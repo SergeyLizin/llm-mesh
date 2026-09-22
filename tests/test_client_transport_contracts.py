@@ -122,3 +122,29 @@ async def test_stream_usage_normalizes_reasoning_and_cache(monkeypatch, provider
     assert usage is not None
     assert (usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
             usage.reasoning_tokens, usage.cache_hit_tokens, usage.cache_miss_tokens) == (10, 4, 14, 3, 6, 4)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('method', ['generate_stream', 'generate_stream_events'])
+async def test_gigachat_stream_filters_unsupported_tool_history(monkeypatch, method):
+    monkeypatch.setenv('LLM_OPTIONS', '{}')
+    data = {'choices': [{'delta': {'content': 'ok'}, 'finish_reason': 'stop'}]}
+    request = LLMRequest(system='s', user='next', history=[
+        {'role': 'user', 'content': 'previous question'},
+        {'role': 'assistant', 'content': 'previous answer'},
+        {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'c', 'type': 'function',
+            'function': {'name': 'f', 'arguments': '{}'}}]},
+        {'role': 'tool', 'tool_call_id': 'c', 'content': 'tool result'},
+    ])
+    with respx.mock as router:
+        route = router.post(BASE + '/chat/completions').mock(return_value=httpx.Response(
+            200, text='data: ' + json.dumps(data) + '\n\ndata: [DONE]\n\n'))
+        async with aclosing(client_for('gigachat')) as client:
+            events = [event async for event in getattr(client, method)(request)]
+    assert events
+    assert json.loads(route.calls[0].request.content)['messages'] == [
+        {'role': 'system', 'content': 's'},
+        {'role': 'user', 'content': 'previous question'},
+        {'role': 'assistant', 'content': 'previous answer'},
+        {'role': 'user', 'content': 'next'},
+    ]

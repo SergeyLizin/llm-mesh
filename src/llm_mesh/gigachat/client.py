@@ -1031,7 +1031,7 @@ class GigaChatAsyncClient:
         """
         body: dict[str, Any] = {
             "model": self.model,
-            "messages": _build_text_messages(request),
+            "messages": _build_text_messages(request, tool_turns=False),
             "max_tokens": self._clip_max_tokens(request.max_tokens),
             "stream": True,
         }
