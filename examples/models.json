@@ -1,0 +1,18 @@
+{
+  "extends": "llm-mesh",
+  "models": [
+    {
+      "id": "custom-model",
+      "title": "Custom model",
+      "kind": "openai",
+      "providers": [
+        {
+          "name": "custom",
+          "model_env": "CUSTOM_LLM_MODEL",
+          "base_url_env": "CUSTOM_LLM_BASE_URL",
+          "api_key_env": "CUSTOM_LLM_API_KEY"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,3013 @@
+[
+  {
+    "id": "gigachat2-light",
+    "title": "GigaChat-2 (Light)",
+    "kind": "gigachat",
+    "legacy_functions": true,
+    "max_tokens": 4096,
+    "providers": [
+      {
+        "name": "gigachat",
+        "model": "GigaChat-2",
+        "base_url_env": "GIGACORP_BASE_URL",
+        "api_key_env": "GIGACORP_API_KEY",
+        "scope_env": "GIGACORP_SCOPE",
+        "eval_concurrency": 5
+      }
+    ],
+    "notes": "Configure the endpoint and credentials through the declared environment variables. Connection reuse can affect effective concurrency limits. Provider eval_concurrency is informational; configure the client limit with LLM_MAX_CONCURRENT."
+  },
+  {
+    "id": "gigachat2-max",
+    "title": "GigaChat-2-Max",
+    "kind": "gigachat",
+    "legacy_functions": true,
+    "max_tokens": 16384,
+    "providers": [
+      {
+        "name": "gigachat",
+        "model": "GigaChat-2-Max",
+        "base_url_env": "GIGACORP_BASE_URL",
+        "api_key_env": "GIGACORP_API_KEY",
+        "scope_env": "GIGACORP_SCOPE",
+        "eval_concurrency": 5
+      }
+    ],
+    "notes": "Production tier."
+  },
+  {
+    "id": "gigachat2-pro",
+    "title": "GigaChat-2-Pro",
+    "kind": "gigachat",
+    "legacy_functions": true,
+    "max_tokens": 8192,
+    "providers": [
+      {
+        "name": "gigachat",
+        "model": "GigaChat-2-Pro",
+        "base_url_env": "GIGACORP_BASE_URL",
+        "api_key_env": "GIGACORP_API_KEY",
+        "scope_env": "GIGACORP_SCOPE",
+        "eval_concurrency": 5
+      }
+    ]
+  },
+  {
+    "id": "aliceai-llm",
+    "title": "AliceAI LLM",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "yandex",
+        "model_env": "YANDEX_ALICEAI_MODEL",
+        "base_url_env": "YANDEX_BASE_URL",
+        "api_key_env": "YANDEX_API_KEY"
+      }
+    ]
+  },
+  {
+    "id": "aliceai-llm-flash",
+    "title": "AliceAI LLM Flash",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "yandex",
+        "model_env": "YANDEX_ALICEAI_FLASH_MODEL",
+        "base_url_env": "YANDEX_BASE_URL",
+        "api_key_env": "YANDEX_API_KEY"
+      }
+    ]
+  },
+  {
+    "id": "yandexgpt-51-pro",
+    "title": "YandexGPT-5.1 Pro",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "yandex",
+        "model_env": "YANDEX_YGPT51_MODEL",
+        "base_url_env": "YANDEX_BASE_URL",
+        "api_key_env": "YANDEX_API_KEY"
+      }
+    ]
+  },
+  {
+    "id": "yandexgpt-5-lite",
+    "title": "YandexGPT-5 Lite",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "yandex",
+        "model_env": "YANDEX_YGPT5LITE_MODEL",
+        "base_url_env": "YANDEX_BASE_URL",
+        "api_key_env": "YANDEX_API_KEY"
+      }
+    ]
+  },
+  {
+    "id": "gemma4-e2b",
+    "title": "Gemma-4 E2B",
+    "kind": "openai",
+    "tool_choice_pref": "auto",
+    "providers": [
+      {
+        "name": "nanogpt",
+        "model": "gemma-4-e2b-it",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      }
+    ]
+  },
+  {
+    "id": "gemma4-e4b-ron",
+    "title": "Gemma-4 E4B (on)",
+    "kind": "openai",
+    "disable_reasoning": false,
+    "tool_choice_pref": "auto",
+    "providers": [
+      {
+        "name": "deepinfra",
+        "model": "google/gemma-4-E4B-it",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "effort": "high"
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "effort": "none"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "gemma4-e4b-roff",
+    "title": "Gemma-4 E4B (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "tool_choice_pref": "auto",
+    "providers": [
+      {
+        "name": "deepinfra",
+        "model": "google/gemma-4-E4B-it",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "reasoning_off": {
+          "reasoning": {
+            "effort": "none"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "gemma4-31b-ultra-ron",
+    "title": "Gemma-4 31B Ultra (on)",
+    "kind": "openai",
+    "disable_reasoning": false,
+    "tool_choice_pref": "auto",
+    "providers": [
+      {
+        "name": "deepinfra",
+        "model": "google/gemma-4-31B-it-Ultra",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "eval_concurrency": 1,
+        "reasoning_on": {
+          "reasoning": {
+            "effort": "high"
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "effort": "none"
+          }
+        }
+      }
+    ],
+    "max_tokens": 8192
+  },
+  {
+    "id": "gemma4-31b-ultra-roff",
+    "title": "Gemma-4 31B Ultra (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "tool_choice_pref": "auto",
+    "providers": [
+      {
+        "name": "deepinfra",
+        "model": "google/gemma-4-31B-it-Ultra",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "eval_concurrency": 1,
+        "reasoning_off": {
+          "reasoning": {
+            "effort": "none"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "gemma4-31b-turbo-ron",
+    "title": "Gemma-4 31B Turbo (on)",
+    "kind": "openai",
+    "disable_reasoning": false,
+    "tool_choice_pref": "auto",
+    "providers": [
+      {
+        "name": "deepinfra",
+        "model": "google/gemma-4-31B-it-turbo",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "eval_concurrency": 1,
+        "reasoning_on": {
+          "reasoning": {
+            "effort": "high"
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "effort": "none"
+          }
+        }
+      }
+    ],
+    "max_tokens": 8192
+  },
+  {
+    "id": "gemma4-31b-turbo-roff",
+    "title": "Gemma-4 31B Turbo (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "tool_choice_pref": "auto",
+    "providers": [
+      {
+        "name": "deepinfra",
+        "model": "google/gemma-4-31B-it-turbo",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "eval_concurrency": 1,
+        "reasoning_off": {
+          "reasoning": {
+            "effort": "none"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "gemma4-31b-ron",
+    "title": "Gemma-4 31B (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "silicon",
+        "model": "google/gemma-4-31b-it",
+        "base_url_env": "SILICON_BASE_URL",
+        "api_key_env": "SILICON_API_KEY",
+        "response_format": "json_object",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "polza",
+        "model": "google/gemma-4-31b-it",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "enabled": true
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        },
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "nanogpt",
+        "model": "google/gemma-4-31b-it:thinking",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "eval_concurrency": 1,
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "llmgateway",
+        "model": "gemma-4-31b-it",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "llmgw-cerebras",
+        "model": "cerebras/gemma-4-31b-it",
+        "open_object_schemas": "unsupported",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "llmgw-runware",
+        "model": "runware/gemma-4-31b-it",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "croft",
+        "model": "gemma-4-31b-it",
+        "base_url_env": "CROFT_BASE_URL",
+        "api_key_env": "CROFT_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "enabled": true
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        },
+        "http_timeout": 90,
+        "eval_concurrency": 1
+      },
+      {
+        "name": "cerebras",
+        "model": "gemma-4-31b",
+        "base_url_env": "CEREBRAS_BASE_URL",
+        "api_key_env": "CEREBRAS_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "eval_concurrency": 1
+      }
+    ],
+    "notes": "Direct Cerebras has no reasoning_field (403; the client then reads both known names) and is last because of its rate limit; LLMGW is the intended path. Credential-based selection does not check health. polza-cerebras is omitted here: the pin exposed no reasoning channel."
+  },
+  {
+    "id": "gemma4-31b-roff",
+    "title": "Gemma-4 31B (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "providers": [
+      {
+        "name": "silicon",
+        "model": "google/gemma-4-31b-it",
+        "base_url_env": "SILICON_BASE_URL",
+        "api_key_env": "SILICON_API_KEY",
+        "response_format": "json_object",
+        "reasoning_off": {},
+        "eval_concurrency": 1
+      },
+      {
+        "name": "polza",
+        "model": "google/gemma-4-31b-it",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning",
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "nanogpt",
+        "model": "google/gemma-4-31b-it",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "eval_concurrency": 1,
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "llmgateway",
+        "model": "gemma-4-31b-it",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "llmgw-cerebras",
+        "model": "cerebras/gemma-4-31b-it",
+        "open_object_schemas": "unsupported",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "llmgw-runware",
+        "model": "runware/gemma-4-31b-it",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "croft",
+        "model": "gemma-4-31b-it",
+        "base_url_env": "CROFT_BASE_URL",
+        "api_key_env": "CROFT_API_KEY",
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        },
+        "http_timeout": 90,
+        "eval_concurrency": 1
+      },
+      {
+        "name": "cerebras",
+        "model": "gemma-4-31b",
+        "base_url_env": "CEREBRAS_BASE_URL",
+        "api_key_env": "CEREBRAS_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "polza-cerebras",
+        "model": "google/gemma-4-31b-it",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "extra_body": {
+          "provider": {
+            "order": [
+              "cerebras/fp16"
+            ],
+            "allow_fallbacks": false
+          }
+        },
+        "max_tokens": 40960,
+        "eval_concurrency": 1
+      }
+    ],
+    "notes": "Direct Cerebras has no reasoning_field and is last because of its rate limit; LLMGW is the intended path. Credential-based selection does not check health. polza-cerebras pins cerebras/fp16; keep it last and opt-in through gemma4-31b-roff@polza-cerebras. The 40960 output ceiling is required (41000 returned a misleading 400). That pin has no reasoning_off/reasoning_field: it exposed no reasoning channel."
+  },
+  {
+    "id": "gemma4-26b-a4b-ron",
+    "title": "Gemma-4 26B-A4B (on)",
+    "kind": "openai",
+    "disable_reasoning": false,
+    "providers": [
+      {
+        "name": "silicon",
+        "model": "google/gemma-4-26B-A4B-it",
+        "base_url_env": "SILICON_BASE_URL",
+        "api_key_env": "SILICON_API_KEY",
+        "response_format": "json_object",
+        "reasoning_on": {
+          "chat_template_kwargs": {
+            "enable_thinking": true
+          }
+        },
+        "reasoning_off": {
+          "chat_template_kwargs": {
+            "enable_thinking": false
+          }
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "polza",
+        "model": "google/gemma-4-26b-a4b-it",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "enabled": true
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        },
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "aihubmix",
+        "model": "gemma-4-26b-a4b-it",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "deepinfra",
+        "model": "google/gemma-4-26B-A4B-it",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "effort": "high"
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "effort": "none"
+          }
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "nanogpt",
+        "model": "google/gemma-4-26b-a4b-it:thinking",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "eval_concurrency": 1,
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "llmgateway",
+        "model": "gemma-4-26b-a4b-it",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "hf-router",
+        "model": "google/gemma-4-26B-A4B-it",
+        "base_url_env": "HFROUTER_BASE_URL",
+        "api_key_env": "HFROUTER_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "enabled": true
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        },
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      }
+    ],
+    "notes": "SiliconFlow requires chat_template_kwargs.enable_thinking. Hugging Face Router needs the explicit field so the paired configuration stays symmetric."
+  },
+  {
+    "id": "gemma4-26b-a4b-roff",
+    "title": "Gemma-4 26B-A4B (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "providers": [
+      {
+        "name": "silicon",
+        "model": "google/gemma-4-26B-A4B-it",
+        "base_url_env": "SILICON_BASE_URL",
+        "api_key_env": "SILICON_API_KEY",
+        "response_format": "json_object",
+        "reasoning_off": {},
+        "eval_concurrency": 1
+      },
+      {
+        "name": "polza",
+        "model": "google/gemma-4-26b-a4b-it",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning",
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "hf-router",
+        "model": "google/gemma-4-26B-A4B-it",
+        "base_url_env": "HFROUTER_BASE_URL",
+        "api_key_env": "HFROUTER_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "aihubmix",
+        "model": "gemma-4-26b-a4b-it",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "deepinfra",
+        "model": "google/gemma-4-26B-A4B-it",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "reasoning_off": {
+          "reasoning": {
+            "effort": "none"
+          }
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "nanogpt",
+        "model": "google/gemma-4-26b-a4b-it",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "eval_concurrency": 1,
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "llmgateway",
+        "model": "gemma-4-26b-a4b-it",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      }
+    ]
+  },
+  {
+    "id": "gemma4-12b-roff",
+    "title": "Gemma-4 12B (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "providers": [
+      {
+        "name": "silicon",
+        "model": "google/gemma-4-12B-it",
+        "base_url_env": "SILICON_BASE_URL",
+        "api_key_env": "SILICON_API_KEY",
+        "response_format": "json_object",
+        "reasoning_off": {}
+      }
+    ]
+  },
+  {
+    "id": "gemini-31-pro-ron",
+    "sanitize_enums": true,
+    "notes": "sanitize_enums is required: numeric enums and nullable type unions fail on Cherry, Polza, and AIHubMix.",
+    "title": "Gemini-3.1 Pro (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "polza",
+        "model": "google/gemini-3.1-pro-preview",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "aihubmix",
+        "model": "gemini-3.1-pro-preview",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY"
+      },
+      {
+        "name": "cherry",
+        "model": "google/gemini-3.1-pro-preview",
+        "base_url_env": "CHERRY_BASE_URL",
+        "api_key_env": "CHERRY_API_KEY"
+      }
+    ]
+  },
+  {
+    "id": "gemini-3-flash-ron",
+    "sanitize_enums": true,
+    "notes": "sanitize_enums is required: numeric enums and nullable type unions fail on Cherry, Polza, and AIHubMix.",
+    "title": "Gemini-3.6 Flash (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "polza",
+        "model": "google/gemini-3.6-flash",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "aihubmix",
+        "model": "gemini-3.6-flash",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY"
+      },
+      {
+        "name": "cherry",
+        "model": "google/gemini-3.6-flash",
+        "base_url_env": "CHERRY_BASE_URL",
+        "api_key_env": "CHERRY_API_KEY"
+      }
+    ]
+  },
+  {
+    "id": "qwen37-max-ron",
+    "title": "Qwen3.7 Max (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "tool_choice_pref": "auto",
+    "providers": [
+      {
+        "name": "alibaba",
+        "model": "qwen3.7-max",
+        "base_url_env": "ALIBABA_BASE_URL",
+        "api_key_env": "ALIBABA_API_KEY"
+      },
+      {
+        "name": "polza",
+        "model": "qwen/qwen3.7-max",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "cherry",
+        "model": "qwen/qwen3.7-max",
+        "base_url_env": "CHERRY_BASE_URL",
+        "api_key_env": "CHERRY_API_KEY"
+      },
+      {
+        "name": "aihubmix",
+        "model": "qwen3.7-max",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY"
+      },
+      {
+        "name": "opencode",
+        "model": "qwen3.7-max",
+        "base_url_env": "OPENCODE_BASE_URL",
+        "api_key_env": "OPENCODE_API_KEY"
+      }
+    ]
+  },
+  {
+    "id": "qwen37-max-roff",
+    "title": "Qwen3.7 Max (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "providers": [
+      {
+        "name": "alibaba",
+        "model": "qwen3.7-max",
+        "base_url_env": "ALIBABA_BASE_URL",
+        "api_key_env": "ALIBABA_API_KEY",
+        "reasoning_off": {
+          "enable_thinking": false
+        }
+      },
+      {
+        "name": "aihubmix",
+        "model": "qwen3.7-max",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "opencode",
+        "model": "qwen3.7-max",
+        "base_url_env": "OPENCODE_BASE_URL",
+        "api_key_env": "OPENCODE_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "qwen37-plus-roff",
+    "title": "Qwen3.7 Plus (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "providers": [
+      {
+        "name": "alibaba",
+        "model": "qwen3.7-plus",
+        "base_url_env": "ALIBABA_BASE_URL",
+        "api_key_env": "ALIBABA_API_KEY",
+        "reasoning_off": {
+          "enable_thinking": false
+        }
+      },
+      {
+        "name": "aihubmix",
+        "model": "qwen3.7-plus",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "opencode",
+        "model": "qwen3.7-plus",
+        "base_url_env": "OPENCODE_BASE_URL",
+        "api_key_env": "OPENCODE_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      }
+    ],
+    "notes": "response_format is deliberately unset: json_schema increased completion tokens and latency enough to erase the prompt-token saving."
+  },
+  {
+    "id": "qwen36-flash-roff",
+    "title": "Qwen3.6 Flash (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "providers": [
+      {
+        "name": "alibaba",
+        "model": "qwen3.6-flash",
+        "base_url_env": "ALIBABA_BASE_URL",
+        "api_key_env": "ALIBABA_API_KEY",
+        "reasoning_off": {
+          "enable_thinking": false
+        }
+      },
+      {
+        "name": "polza",
+        "model": "qwen/qwen3.6-flash",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "aihubmix",
+        "model": "qwen3.6-flash",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "qwen3-coder-next",
+    "title": "Qwen3 Coder Next",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "cloudru",
+        "model": "Qwen/Qwen3-Coder-Next",
+        "base_url_env": "CLOUDRU_BASE_URL",
+        "api_key_env": "CLOUDRU_API_KEY"
+      }
+    ]
+  },
+  {
+    "id": "qwen36-27b-ron",
+    "title": "Qwen3.6 27B (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "tool_choice_pref": "auto",
+    "providers": [
+      {
+        "name": "silicon",
+        "model": "Qwen/Qwen3.6-27B",
+        "base_url_env": "SILICON_BASE_URL",
+        "api_key_env": "SILICON_API_KEY",
+        "response_format": "json_object",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "polza",
+        "model": "qwen/qwen3.6-27b",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "hf-router",
+        "model": "Qwen/Qwen3.6-27B",
+        "base_url_env": "HFROUTER_BASE_URL",
+        "api_key_env": "HFROUTER_API_KEY",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "aihubmix",
+        "model": "qwen3.6-27b",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "dashscope",
+        "model": "qwen3.6-27b",
+        "base_url_env": "DASHSCOPE_BASE_URL",
+        "api_key_env": "DASHSCOPE_API_KEY",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "nanogpt",
+        "model": "alibaba/qwen3.6-27b:thinking",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "eval_concurrency": 1,
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "croft",
+        "model": "qwen3.6-27b",
+        "base_url_env": "CROFT_BASE_URL",
+        "api_key_env": "CROFT_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "enabled": true
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        },
+        "http_timeout": 90,
+        "eval_concurrency": 1
+      }
+    ]
+  },
+  {
+    "id": "qwen36-27b-roff",
+    "title": "Qwen3.6 27B (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "providers": [
+      {
+        "name": "dashscope",
+        "model": "qwen3.6-27b",
+        "base_url_env": "DASHSCOPE_BASE_URL",
+        "api_key_env": "DASHSCOPE_API_KEY",
+        "reasoning_off": {
+          "enable_thinking": false
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "silicon",
+        "model": "Qwen/Qwen3.6-27B",
+        "base_url_env": "SILICON_BASE_URL",
+        "api_key_env": "SILICON_API_KEY",
+        "response_format": "json_object",
+        "reasoning_off": {
+          "enable_thinking": false
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "polza",
+        "model": "qwen/qwen3.6-27b",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "aihubmix",
+        "model": "qwen3.6-27b",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "hf-router",
+        "model": "Qwen/Qwen3.6-27B",
+        "base_url_env": "HFROUTER_BASE_URL",
+        "api_key_env": "HFROUTER_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "eval_concurrency": 1,
+        "notes": "This gateway rejects vendor body keys with HTTP 400 extra-argument errors. The client retries without them, but structured requests then return HTTP 500."
+      },
+      {
+        "name": "nanogpt",
+        "model": "alibaba/qwen3.6-27b",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "eval_concurrency": 1,
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "croft",
+        "model": "qwen3.6-27b",
+        "base_url_env": "CROFT_BASE_URL",
+        "api_key_env": "CROFT_API_KEY",
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        },
+        "http_timeout": 90,
+        "eval_concurrency": 1
+      }
+    ]
+  },
+  {
+    "id": "qwen36-35b-a3b-roff",
+    "title": "Qwen3.6 35B-A3B (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "providers": [
+      {
+        "name": "silicon",
+        "model": "Qwen/Qwen3.6-35B-A3B",
+        "base_url_env": "SILICON_BASE_URL",
+        "api_key_env": "SILICON_API_KEY",
+        "response_format": "json_object",
+        "eval_concurrency": 1,
+        "reasoning_off": {
+          "enable_thinking": false
+        }
+      },
+      {
+        "name": "cloudru",
+        "model": "Qwen/Qwen3.6-35B-A3B",
+        "base_url_env": "CLOUDRU_BASE_URL",
+        "api_key_env": "CLOUDRU_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "dashscope",
+        "model": "qwen3.6-35b-a3b",
+        "base_url_env": "DASHSCOPE_BASE_URL",
+        "api_key_env": "DASHSCOPE_API_KEY",
+        "reasoning_off": {
+          "enable_thinking": false
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "nanogpt",
+        "model": "Qwen/Qwen3.6-35B-A3B",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      }
+    ],
+    "notes": "Reasoning model: without disable_reasoning, it returns empty content with finish_reason=length."
+  },
+  {
+    "id": "deepseek-v4-pro-ron",
+    "disable_thinking_for_tools": true,
+    "notes": "Without disable_thinking_for_tools the first structured call gets a 400 thinking/tool_choice conflict. The workaround is per instance, so per-request clients pay repeatedly. Reasoning-off siblings do not need this flag.",
+    "title": "DeepSeek-v4 Pro (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "tool_choice_pref": "auto",
+    "providers": [
+      {
+        "name": "aihubmix",
+        "model": "deepseek-v4-pro",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "reasoning_on": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "opencode",
+        "model": "deepseek-v4-pro",
+        "base_url_env": "OPENCODE_BASE_URL",
+        "api_key_env": "OPENCODE_API_KEY",
+        "reasoning_on": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "cherry",
+        "model": "deepseek/deepseek-v4-pro",
+        "base_url_env": "CHERRY_BASE_URL",
+        "api_key_env": "CHERRY_API_KEY",
+        "reasoning_on": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "alibaba",
+        "model": "deepseek-v4-pro",
+        "base_url_env": "ALIBABA_BASE_URL",
+        "api_key_env": "ALIBABA_API_KEY",
+        "reasoning_on": {
+          "enable_thinking": true
+        },
+        "reasoning_off": {
+          "enable_thinking": false
+        }
+      },
+      {
+        "name": "deepseek",
+        "model": "deepseek-v4-pro",
+        "base_url_env": "DEEPSEEK_BASE_URL",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "reasoning_on": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "silicon",
+        "model": "deepseek-ai/DeepSeek-V4-Pro",
+        "base_url_env": "SILICON_BASE_URL",
+        "api_key_env": "SILICON_API_KEY",
+        "response_format": "json_object",
+        "reasoning_on": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "polza",
+        "model": "deepseek/deepseek-v4-pro",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_on": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "hf-router",
+        "model": "deepseek-ai/DeepSeek-V4-Pro",
+        "base_url_env": "HFROUTER_BASE_URL",
+        "api_key_env": "HFROUTER_API_KEY",
+        "reasoning_on": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "deepinfra",
+        "model": "deepseek-ai/DeepSeek-V4-Pro",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "effort": "high"
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "effort": "none"
+          }
+        }
+      },
+      {
+        "name": "nanogpt",
+        "model": "deepseek/deepseek-v4-pro:thinking",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "llmgateway",
+        "model": "deepseek-v4-pro",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "unorouter",
+        "model": "deepseek-v4-pro",
+        "base_url_env": "UNOROUTER_BASE_URL",
+        "api_key_env": "UNOROUTER_API_KEY",
+        "http_timeout": 180
+      },
+      {
+        "name": "croft",
+        "model": "deepseek-v4-pro",
+        "base_url_env": "CROFT_BASE_URL",
+        "api_key_env": "CROFT_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "enabled": true
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        },
+        "http_timeout": 90
+      }
+    ]
+  },
+  {
+    "id": "deepseek-v4-pro-roff",
+    "title": "DeepSeek-v4 Pro (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "tool_choice_pref": "required",
+    "providers": [
+      {
+        "name": "alibaba",
+        "model": "deepseek-v4-pro",
+        "base_url_env": "ALIBABA_BASE_URL",
+        "api_key_env": "ALIBABA_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "deepseek",
+        "model": "deepseek-v4-pro",
+        "base_url_env": "DEEPSEEK_BASE_URL",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "silicon",
+        "model": "deepseek-ai/DeepSeek-V4-Pro",
+        "base_url_env": "SILICON_BASE_URL",
+        "api_key_env": "SILICON_API_KEY",
+        "response_format": "json_object",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "polza",
+        "model": "deepseek/deepseek-v4-pro",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "cloudru",
+        "model": "deepseek-ai/DeepSeek-V4-Pro",
+        "base_url_env": "CLOUDRU_BASE_URL",
+        "api_key_env": "CLOUDRU_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "hf-router",
+        "model": "deepseek-ai/DeepSeek-V4-Pro",
+        "base_url_env": "HFROUTER_BASE_URL",
+        "api_key_env": "HFROUTER_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "aihubmix",
+        "model": "deepseek-v4-pro",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "opencode",
+        "model": "deepseek-v4-pro",
+        "base_url_env": "OPENCODE_BASE_URL",
+        "api_key_env": "OPENCODE_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "deepinfra",
+        "model": "deepseek-ai/DeepSeek-V4-Pro",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "reasoning_off": {
+          "reasoning": {
+            "effort": "none"
+          }
+        }
+      },
+      {
+        "name": "nanogpt",
+        "model": "deepseek/deepseek-v4-pro",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "llmgateway",
+        "model": "deepseek-v4-pro",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "croft",
+        "model": "deepseek-v4-pro",
+        "base_url_env": "CROFT_BASE_URL",
+        "api_key_env": "CROFT_API_KEY",
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        },
+        "http_timeout": 90
+      }
+    ],
+    "notes": "Neither Polza dialect actually disables thinking. Do not rely on this route's reasoning-off label; use a budget floor or another gateway."
+  },
+  {
+    "id": "deepseek-v4-flash-ron",
+    "disable_thinking_for_tools": true,
+    "notes": "Without disable_thinking_for_tools the first structured call gets a 400 thinking/tool_choice conflict. The workaround is per instance, so per-request clients pay repeatedly. Reasoning-off siblings do not need this flag.",
+    "title": "DeepSeek-v4 Flash (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "tool_choice_pref": "auto",
+    "providers": [
+      {
+        "name": "deepseek",
+        "model": "deepseek-v4-flash",
+        "base_url_env": "DEEPSEEK_BASE_URL",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "reasoning_on": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "alibaba",
+        "model": "deepseek-v4-flash-0731",
+        "base_url_env": "ALIBABA_BASE_URL",
+        "api_key_env": "ALIBABA_API_KEY",
+        "reasoning_on": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "silicon",
+        "model": "deepseek-ai/DeepSeek-V4-Flash",
+        "base_url_env": "SILICON_BASE_URL",
+        "api_key_env": "SILICON_API_KEY",
+        "response_format": "json_object",
+        "reasoning_on": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "polza",
+        "model": "deepseek/deepseek-v4-flash",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "enabled": true
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        },
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "cloudru",
+        "model": "deepseek-ai/DeepSeek-V4-Flash",
+        "base_url_env": "CLOUDRU_BASE_URL",
+        "api_key_env": "CLOUDRU_API_KEY",
+        "reasoning_on": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "hf-router",
+        "model": "deepseek-ai/DeepSeek-V4-Flash",
+        "base_url_env": "HFROUTER_BASE_URL",
+        "api_key_env": "HFROUTER_API_KEY",
+        "reasoning_on": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "aihubmix",
+        "model": "deepseek-v4-flash",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "reasoning_on": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "cherry",
+        "model": "deepseek/deepseek-v4-flash",
+        "base_url_env": "CHERRY_BASE_URL",
+        "api_key_env": "CHERRY_API_KEY",
+        "reasoning_on": {
+          "thinking": {
+            "type": "enabled"
+          }
+        },
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "deepinfra",
+        "model": "deepseek-ai/DeepSeek-V4-Flash",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "effort": "high"
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "effort": "none"
+          }
+        }
+      },
+      {
+        "name": "nanogpt",
+        "model": "deepseek/deepseek-v4-flash:thinking",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "llmgateway",
+        "model": "deepseek-v4-flash",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "unorouter",
+        "model": "deepseek-v4-flash",
+        "base_url_env": "UNOROUTER_BASE_URL",
+        "api_key_env": "UNOROUTER_API_KEY",
+        "http_timeout": 180
+      },
+      {
+        "name": "croft",
+        "model": "deepseek-v4-flash",
+        "base_url_env": "CROFT_BASE_URL",
+        "api_key_env": "CROFT_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "enabled": true
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        },
+        "http_timeout": 90
+      }
+    ]
+  },
+  {
+    "id": "deepseek-v4-flash-roff",
+    "title": "DeepSeek-v4 Flash (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "tool_choice_pref": "required",
+    "providers": [
+      {
+        "name": "deepseek",
+        "model": "deepseek-v4-flash",
+        "base_url_env": "DEEPSEEK_BASE_URL",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "cloudru",
+        "model": "deepseek-ai/DeepSeek-V4-Flash",
+        "base_url_env": "CLOUDRU_BASE_URL",
+        "api_key_env": "CLOUDRU_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "aihubmix",
+        "model": "deepseek-v4-flash",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "deepinfra",
+        "model": "deepseek-ai/DeepSeek-V4-Flash",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "reasoning_off": {
+          "reasoning": {
+            "effort": "none"
+          }
+        }
+      },
+      {
+        "name": "nanogpt",
+        "model": "deepseek/deepseek-v4-flash",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "llmgateway",
+        "model": "deepseek-v4-flash",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "croft",
+        "model": "deepseek-v4-flash",
+        "base_url_env": "CROFT_BASE_URL",
+        "api_key_env": "CROFT_API_KEY",
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        },
+        "http_timeout": 90
+      }
+    ]
+  },
+  {
+    "id": "glm-45-air-ron",
+    "title": "GLM-4.5 Air 106B-A12B (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "tool_choice_pref": "required",
+    "providers": [
+      {
+        "name": "zai",
+        "model": "glm-4.5-air",
+        "base_url_env": "ZAI_BASE_URL",
+        "api_key_env": "ZAI_API_KEY"
+      },
+      {
+        "name": "nanogpt",
+        "model": "zai-org/GLM-4.5-Air:thinking",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_field": "reasoning"
+      }
+    ]
+  },
+  {
+    "id": "glm-45-air-roff",
+    "title": "GLM-4.5 Air 106B-A12B (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "tool_choice_pref": "required",
+    "providers": [
+      {
+        "name": "zai",
+        "model": "glm-4.5-air",
+        "base_url_env": "ZAI_BASE_URL",
+        "api_key_env": "ZAI_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "nanogpt",
+        "model": "zai-org/GLM-4.5-Air",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning"
+      }
+    ]
+  },
+  {
+    "id": "glm-52-ron",
+    "title": "GLM-5.2 (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "zai",
+        "model": "glm-5.2",
+        "base_url_env": "ZAI_BASE_URL",
+        "api_key_env": "ZAI_API_KEY",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "silicon",
+        "model": "zai-org/GLM-5.2",
+        "base_url_env": "SILICON_BASE_URL",
+        "api_key_env": "SILICON_API_KEY",
+        "response_format": "json_object",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "polza",
+        "model": "z-ai/glm-5.2",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "cloudru",
+        "model": "zai-org/GLM-5.2",
+        "base_url_env": "CLOUDRU_BASE_URL",
+        "api_key_env": "CLOUDRU_API_KEY",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "alibaba",
+        "model": "glm-5.2",
+        "base_url_env": "ALIBABA_BASE_URL",
+        "api_key_env": "ALIBABA_API_KEY",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "hf-router",
+        "model": "zai-org/GLM-5.2",
+        "base_url_env": "HFROUTER_BASE_URL",
+        "api_key_env": "HFROUTER_API_KEY",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "aihubmix",
+        "model": "glm-5.2",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "opencode",
+        "model": "glm-5.2",
+        "base_url_env": "OPENCODE_BASE_URL",
+        "api_key_env": "OPENCODE_API_KEY",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "cherry",
+        "model": "z-ai/glm-5.2",
+        "base_url_env": "CHERRY_BASE_URL",
+        "api_key_env": "CHERRY_API_KEY",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "nanogpt",
+        "model": "zai-org/glm-5.2:thinking",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "canopywave",
+        "model": "zai/glm-5.2",
+        "base_url_env": "CANOPYWAVE_BASE_URL",
+        "api_key_env": "CANOPYWAVE_PRO1_API_KEY",
+        "eval_concurrency": 1
+      }
+    ]
+  },
+  {
+    "id": "glm-52-roff",
+    "title": "GLM-5.2 (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "providers": [
+      {
+        "name": "zai",
+        "model": "glm-5.2",
+        "base_url_env": "ZAI_BASE_URL",
+        "api_key_env": "ZAI_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "silicon",
+        "model": "zai-org/GLM-5.2",
+        "base_url_env": "SILICON_BASE_URL",
+        "api_key_env": "SILICON_API_KEY",
+        "response_format": "json_object",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "polza",
+        "model": "z-ai/glm-5.2",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "cloudru",
+        "model": "zai-org/GLM-5.2",
+        "base_url_env": "CLOUDRU_BASE_URL",
+        "api_key_env": "CLOUDRU_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "alibaba",
+        "model": "glm-5.2",
+        "base_url_env": "ALIBABA_BASE_URL",
+        "api_key_env": "ALIBABA_API_KEY",
+        "reasoning_off": {
+          "enable_thinking": false
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "hf-router",
+        "model": "zai-org/GLM-5.2",
+        "base_url_env": "HFROUTER_BASE_URL",
+        "api_key_env": "HFROUTER_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "aihubmix",
+        "model": "glm-5.2",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "eval_concurrency": 1
+      },
+      {
+        "name": "nanogpt",
+        "model": "zai-org/glm-5.2",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "canopywave",
+        "model": "zai/glm-5.2",
+        "base_url_env": "CANOPYWAVE_BASE_URL",
+        "api_key_env": "CANOPYWAVE_PRO1_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "eval_concurrency": 1
+      }
+    ],
+    "notes": "Neither Polza dialect actually disables thinking. Do not rely on this route's reasoning-off label; use a budget floor or another gateway."
+  },
+  {
+    "id": "glm-53-flash-ron",
+    "title": "GLM-5.3-Flash (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "zai",
+        "model": "glm-5.3-flash",
+        "base_url_env": "ZAI_BASE_URL",
+        "api_key_env": "ZAI_API_KEY",
+        "eval_concurrency": 3
+      }
+    ]
+  },
+  {
+    "id": "glm-53-flash-roff",
+    "title": "GLM-5.3-Flash (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "providers": [
+      {
+        "name": "zai",
+        "model": "glm-5.3-flash",
+        "base_url_env": "ZAI_BASE_URL",
+        "api_key_env": "ZAI_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "eval_concurrency": 3
+      }
+    ]
+  },
+  {
+    "id": "glm-47-ron",
+    "title": "GLM-4.7 (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "notes": "No reasoning-off sibling: Cerebras through LLMGW did not honor any disable dialect. min_output_tokens 4000 is required; smaller budgets truncate or return empty content.",
+    "providers": [
+      {
+        "name": "llmgw-cerebras",
+        "model": "cerebras/glm-4.7",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_field": "reasoning",
+        "min_output_tokens": 4000
+      }
+    ]
+  },
+  {
+    "id": "glm-47-flash-roff",
+    "title": "GLM-4.7 Flash (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "providers": [
+      {
+        "name": "polza",
+        "model": "z-ai/glm-4.7-flash",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "hf-router",
+        "model": "zai-org/GLM-4.7-Flash",
+        "base_url_env": "HFROUTER_BASE_URL",
+        "api_key_env": "HFROUTER_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      }
+    ],
+    "notes": "Neither Polza dialect actually disables thinking. Do not rely on this route's reasoning-off label; use a budget floor or another gateway."
+  },
+  {
+    "id": "kimi-k3-ron",
+    "title": "Kimi-K3 (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "force_temperature": 1,
+    "tool_choice_pref": "required",
+    "providers": [
+      {
+        "name": "kimi",
+        "model": "k3",
+        "base_url_env": "KIMI_BASE_URL",
+        "api_key_env": "KIMI_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "name": "silicon",
+        "model": "moonshotai/Kimi-K3",
+        "base_url_env": "SILICON_BASE_URL",
+        "api_key_env": "SILICON_API_KEY",
+        "response_format": "json_object"
+      },
+      {
+        "name": "aihubmix",
+        "model": "kimi-k3",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "name": "opencode",
+        "model": "kimi-k3",
+        "base_url_env": "OPENCODE_BASE_URL",
+        "api_key_env": "OPENCODE_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "name": "cherry",
+        "model": "moonshotai/kimi-k3",
+        "base_url_env": "CHERRY_BASE_URL",
+        "api_key_env": "CHERRY_API_KEY"
+      },
+      {
+        "name": "nanogpt",
+        "model": "moonshotai/kimi-k3",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "llmgateway",
+        "model": "kimi-k3",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "unorouter",
+        "model": "kimi-k3",
+        "base_url_env": "UNOROUTER_BASE_URL",
+        "api_key_env": "UNOROUTER_API_KEY",
+        "http_timeout": 180
+      },
+      {
+        "name": "croft",
+        "model": "kimi-k3",
+        "base_url_env": "CROFT_BASE_URL",
+        "api_key_env": "CROFT_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "enabled": true
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        },
+        "http_timeout": 90
+      }
+    ]
+  },
+  {
+    "id": "minimax-m3-ron",
+    "title": "MiniMax-M3 (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "cloudru",
+        "model": "MiniMaxAI/MiniMax-M3",
+        "base_url_env": "CLOUDRU_BASE_URL",
+        "api_key_env": "CLOUDRU_API_KEY"
+      },
+      {
+        "name": "polza",
+        "model": "minimax/minimax-m3",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "silicon",
+        "model": "MiniMaxAI/MiniMax-M3",
+        "base_url_env": "SILICON_BASE_URL",
+        "api_key_env": "SILICON_API_KEY",
+        "response_format": "json_object"
+      },
+      {
+        "name": "aihubmix",
+        "model": "minimax-m3",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "enabled": true
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        }
+      },
+      {
+        "name": "opencode",
+        "model": "minimax-m3",
+        "base_url_env": "OPENCODE_BASE_URL",
+        "api_key_env": "OPENCODE_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "enabled": true
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        }
+      },
+      {
+        "name": "cherry",
+        "model": "minimax/minimax-m3",
+        "base_url_env": "CHERRY_BASE_URL",
+        "api_key_env": "CHERRY_API_KEY"
+      },
+      {
+        "name": "deepinfra",
+        "model": "MiniMaxAI/MiniMax-M3",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "effort": "high"
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "effort": "none"
+          }
+        }
+      },
+      {
+        "name": "nanogpt",
+        "model": "minimax/minimax-m3:thinking",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "llmgateway",
+        "model": "minimax-m3",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "unorouter",
+        "model": "minimax-m3",
+        "base_url_env": "UNOROUTER_BASE_URL",
+        "api_key_env": "UNOROUTER_API_KEY",
+        "http_timeout": 180
+      }
+    ]
+  },
+  {
+    "id": "minimax-m3-roff",
+    "title": "MiniMax-M3 (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "providers": [
+      {
+        "name": "aihubmix",
+        "model": "minimax-m3",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        }
+      },
+      {
+        "name": "opencode",
+        "model": "minimax-m3",
+        "base_url_env": "OPENCODE_BASE_URL",
+        "api_key_env": "OPENCODE_API_KEY",
+        "reasoning_off": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      },
+      {
+        "name": "cherry",
+        "model": "minimax/minimax-m3",
+        "base_url_env": "CHERRY_BASE_URL",
+        "api_key_env": "CHERRY_API_KEY",
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        }
+      },
+      {
+        "name": "deepinfra",
+        "model": "MiniMaxAI/MiniMax-M3",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "reasoning_off": {
+          "reasoning": {
+            "effort": "none"
+          }
+        }
+      },
+      {
+        "name": "nanogpt",
+        "model": "minimax/minimax-m3",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning"
+      }
+    ]
+  },
+  {
+    "id": "gpt-55-ron",
+    "title": "GPT-5.5 (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "force_temperature": 1,
+    "providers": [
+      {
+        "name": "aihubmix",
+        "model": "gpt-5.5",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "effort": "high"
+          }
+        },
+        "reasoning_off": {
+          "reasoning": {
+            "enabled": false
+          }
+        }
+      },
+      {
+        "name": "cherry",
+        "model": "openai/gpt-5.5",
+        "base_url_env": "CHERRY_BASE_URL",
+        "api_key_env": "CHERRY_API_KEY"
+      },
+      {
+        "name": "llmgateway",
+        "model": "gpt-5.5",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "reasoning_field": "reasoning"
+      }
+    ]
+  },
+  {
+    "id": "gpt-55-roff",
+    "title": "GPT-5.5 (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "force_temperature": 1,
+    "providers": [
+      {
+        "name": "cloudru",
+        "model": "openai/gpt-5.5",
+        "base_url_env": "CLOUDRU_BASE_URL",
+        "api_key_env": "CLOUDRU_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        }
+      },
+      {
+        "name": "aihubmix",
+        "model": "gpt-5.5",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        }
+      },
+      {
+        "name": "cherry",
+        "model": "openai/gpt-5.5",
+        "base_url_env": "CHERRY_BASE_URL",
+        "api_key_env": "CHERRY_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        }
+      },
+      {
+        "name": "llmgateway",
+        "model": "gpt-5.5",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning"
+      }
+    ]
+  },
+  {
+    "id": "gpt-55-rhigh-textonly",
+    "title": "GPT-5.5 (high, text-only)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "force_temperature": 1,
+    "providers": [
+      {
+        "name": "cloudru",
+        "model": "openai/gpt-5.5",
+        "base_url_env": "CLOUDRU_BASE_URL",
+        "api_key_env": "CLOUDRU_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "name": "aihubmix",
+        "model": "gpt-5.5",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        }
+      },
+      {
+        "name": "cherry",
+        "model": "openai/gpt-5.5",
+        "base_url_env": "CHERRY_BASE_URL",
+        "api_key_env": "CHERRY_API_KEY"
+      }
+    ]
+  },
+  {
+    "id": "gpt-oss-120b-rlow",
+    "title": "GPT-OSS-120B (low)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "notes": "No reasoning-off route: Cloud.ru rejects none, and Cerebras effort is monotonic (low/default/high) rather than off. min_output_tokens 1500 avoids length truncation.",
+    "providers": [
+      {
+        "name": "llmgw-cerebras",
+        "model": "cerebras/gpt-oss-120b",
+        "open_object_schemas": "unsupported",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "low"
+        },
+        "reasoning_field": "reasoning",
+        "min_output_tokens": 1500
+      },
+      {
+        "name": "cloudru",
+        "model": "openai/gpt-oss-120b",
+        "base_url_env": "CLOUDRU_BASE_URL",
+        "api_key_env": "CLOUDRU_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "low"
+        }
+      }
+    ],
+    "max_tokens": 32768
+  },
+  {
+    "id": "gpt-oss-20b-rlow",
+    "title": "GPT-OSS-20B (low)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "cloudru",
+        "model": "openai/gpt-oss-20b",
+        "base_url_env": "CLOUDRU_BASE_URL",
+        "api_key_env": "CLOUDRU_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "low"
+        }
+      },
+      {
+        "name": "deepinfra",
+        "model": "openai/gpt-oss-20b",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "reasoning_on": {
+          "reasoning": {
+            "effort": "low"
+          }
+        }
+      },
+      {
+        "name": "nanogpt",
+        "model": "openai/gpt-oss-20b",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_field": "reasoning"
+      }
+    ]
+  },
+  {
+    "id": "claude-sonnet-5",
+    "title": "Claude Sonnet 5",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "polza",
+        "model": "anthropic/claude-sonnet-5",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "cherry",
+        "model": "anthropic/claude-sonnet-5",
+        "base_url_env": "CHERRY_BASE_URL",
+        "api_key_env": "CHERRY_API_KEY"
+      }
+    ]
+  },
+  {
+    "id": "claude-haiku-45",
+    "title": "Claude Haiku 4.5",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "cloudru",
+        "model": "anthropic/claude-haiku-4.5",
+        "base_url_env": "CLOUDRU_BASE_URL",
+        "api_key_env": "CLOUDRU_API_KEY"
+      },
+      {
+        "name": "cherry",
+        "model": "anthropic/claude-haiku-4.5",
+        "base_url_env": "CHERRY_BASE_URL",
+        "api_key_env": "CHERRY_API_KEY"
+      }
+    ]
+  },
+  {
+    "id": "grok-45-ron",
+    "title": "Grok-4.5 (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "tool_choice_pref": "required",
+    "providers": [
+      {
+        "name": "polza",
+        "model": "x-ai/grok-4.5",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "aihubmix",
+        "model": "grok-4.5",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY"
+      }
+    ]
+  },
+  {
+    "id": "llama-4-maverick",
+    "title": "Llama-4 Maverick",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "polza",
+        "model": "meta-llama/llama-4-maverick",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "aihubmix",
+        "model": "llama-4-maverick",
+        "base_url_env": "AIHUBMIX_BASE_URL",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "hf-router",
+        "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+        "base_url_env": "HFROUTER_BASE_URL",
+        "api_key_env": "HFROUTER_API_KEY",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "nanogpt",
+        "model": "meta-llama/llama-4-maverick",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "deepinfra",
+        "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "llmgateway",
+        "model": "llama-4-maverick-17b-instruct",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      }
+    ]
+  },
+  {
+    "id": "nemotron-35-lightning-ron",
+    "title": "Nemotron 3.5 Lightning (on)",
+    "kind": "openai",
+    "disable_reasoning": false,
+    "providers": [
+      {
+        "name": "deepinfra",
+        "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY"
+      }
+    ]
+  },
+  {
+    "id": "nemotron-35-lightning-roff",
+    "title": "Nemotron 3.5 Lightning (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "providers": [
+      {
+        "name": "deepinfra",
+        "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning",
+        "base_url_env": "DEEPINFRA_BASE_URL",
+        "api_key_env": "DEEPINFRA_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        }
+      }
+    ]
+  },
+  {
+    "id": "mistral-small-32-24b",
+    "title": "Mistral Small 3.2 24B",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "polza",
+        "model": "mistralai/mistral-small-3.2-24b-instruct",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning"
+      }
+    ]
+  },
+  {
+    "id": "command-r7b",
+    "title": "Command R7B",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "disable_tools": true,
+    "providers": [
+      {
+        "name": "polza",
+        "model": "cohere/command-r7b-12-2024",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning"
+      }
+    ]
+  },
+  {
+    "id": "phi-4",
+    "title": "Phi-4",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "disable_tools": true,
+    "providers": [
+      {
+        "name": "polza",
+        "model": "microsoft/phi-4",
+        "base_url_env": "POLZA_BASE_URL",
+        "api_key_env": "POLZA_API_KEY",
+        "reasoning_field": "reasoning"
+      }
+    ]
+  },
+  {
+    "id": "gigachat3-ultra-ron",
+    "title": "GigaChat-3-Ultra (on)",
+    "kind": "gigachat",
+    "legacy_functions": true,
+    "max_tokens": 32768,
+    "disable_reasoning": false,
+    "providers": [
+      {
+        "name": "gigachat",
+        "model": "GigaChat-3-Ultra",
+        "base_url_env": "GIGAPERS_BASE_URL",
+        "api_key_env": "GIGAPERS_API_KEY",
+        "scope_env": "GIGAPERS_SCOPE",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "eval_concurrency": 1,
+        "notes": "reasoning_effort consumes the entire budget without final content. Retained for comparison with reasoning-off."
+      }
+    ],
+    "structured_mode": "json_schema"
+  },
+  {
+    "id": "gigachat3-ultra-roff",
+    "title": "GigaChat-3-Ultra (off)",
+    "kind": "gigachat",
+    "legacy_functions": true,
+    "max_tokens": 32768,
+    "disable_reasoning": true,
+    "providers": [
+      {
+        "name": "gigachat",
+        "model": "GigaChat-3-Ultra",
+        "base_url_env": "GIGAPERS_BASE_URL",
+        "api_key_env": "GIGAPERS_API_KEY",
+        "scope_env": "GIGAPERS_SCOPE",
+        "reasoning_off": {
+          "chat_template_kwargs": {
+            "enable_thinking": false
+          }
+        },
+        "eval_concurrency": 1
+      }
+    ],
+    "structured_mode": "json_schema"
+  },
+  {
+    "id": "gigachat3-pro-ron",
+    "title": "GigaChat-3-Pro (on)",
+    "kind": "gigachat",
+    "legacy_functions": true,
+    "max_tokens": 32768,
+    "disable_reasoning": false,
+    "providers": [
+      {
+        "name": "gigachat",
+        "model": "GigaChat-3-Pro",
+        "base_url_env": "GIGAPERS_BASE_URL",
+        "api_key_env": "GIGAPERS_API_KEY",
+        "scope_env": "GIGAPERS_SCOPE",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "eval_concurrency": 1
+      }
+    ],
+    "structured_mode": "json_schema"
+  },
+  {
+    "id": "gigachat3-pro-roff",
+    "title": "GigaChat-3-Pro (off)",
+    "kind": "gigachat",
+    "legacy_functions": true,
+    "max_tokens": 32768,
+    "disable_reasoning": true,
+    "providers": [
+      {
+        "name": "gigachat",
+        "model": "GigaChat-3-Pro",
+        "base_url_env": "GIGAPERS_BASE_URL",
+        "api_key_env": "GIGAPERS_API_KEY",
+        "scope_env": "GIGAPERS_SCOPE",
+        "reasoning_off": {
+          "chat_template_kwargs": {
+            "enable_thinking": false
+          }
+        },
+        "eval_concurrency": 1
+      }
+    ],
+    "structured_mode": "json_schema"
+  },
+  {
+    "id": "gpt-oss-120b-ron",
+    "title": "GPT-OSS-120B (on)",
+    "kind": "openai",
+    "disable_reasoning": false,
+    "providers": [
+      {
+        "name": "llmgw-cerebras",
+        "model": "cerebras/gpt-oss-120b",
+        "open_object_schemas": "unsupported",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "llmgateway",
+        "model": "gpt-oss-120b",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "nanogpt",
+        "model": "openai/gpt-oss-120b",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "silicon",
+        "model": "openai/gpt-oss-120b",
+        "base_url_env": "SILICON_BASE_URL",
+        "api_key_env": "SILICON_API_KEY",
+        "response_format": "json_object"
+      }
+    ],
+    "max_tokens": 32768
+  },
+  {
+    "id": "mimo-v25-pro-ron",
+    "title": "MiMo V2.5 Pro (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "nanogpt",
+        "model": "xiaomi/mimo-v2.5-pro:thinking",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_field": "reasoning"
+      },
+      {
+        "name": "llmgateway",
+        "model": "mimo-v2.5-pro",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning"
+      }
+    ]
+  },
+  {
+    "id": "mimo-v25-pro-roff",
+    "title": "MiMo V2.5 Pro (off)",
+    "kind": "openai",
+    "disable_reasoning": true,
+    "providers": [
+      {
+        "name": "llmgateway",
+        "model": "mimo-v2.5-pro",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning"
+      }
+    ]
+  },
+  {
+    "id": "qwen35-9b-ron",
+    "title": "Qwen3.5 9B (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "nanogpt",
+        "model": "Qwen/Qwen3.5-9B",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_field": "reasoning"
+      }
+    ]
+  },
+  {
+    "id": "qwen36-35b-a3b-ron",
+    "title": "Qwen3.6 35B-A3B (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "providers": [
+      {
+        "name": "nanogpt",
+        "model": "Qwen/Qwen3.6-35B-A3B:thinking",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      },
+      {
+        "name": "llmgateway",
+        "model": "qwen3.6-35b-a3b",
+        "base_url_env": "LLMGW_BASE_URL",
+        "api_key_env": "LLMGW_API_KEY",
+        "reasoning_on": {
+          "reasoning_effort": "high"
+        },
+        "reasoning_off": {
+          "reasoning_effort": "none"
+        },
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      }
+    ]
+  },
+  {
+    "id": "qwen38-27b-roff",
+    "title": "Qwen3.8 27B (off)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "tool_choice_pref": "auto",
+    "providers": [
+      {
+        "name": "nanogpt",
+        "model": "qwen3.8-27b",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      }
+    ]
+  },
+  {
+    "id": "qwen38-27b-ron",
+    "title": "Qwen3.8 27B (on)",
+    "kind": "openai",
+    "disable_reasoning": null,
+    "tool_choice_pref": "auto",
+    "providers": [
+      {
+        "name": "nanogpt",
+        "model": "qwen3.8-27b:thinking",
+        "base_url_env": "NANOGPT_BASE_URL",
+        "api_key_env": "NANOGPT_API_KEY",
+        "reasoning_field": "reasoning",
+        "eval_concurrency": 1
+      }
+    ]
+  }
+]

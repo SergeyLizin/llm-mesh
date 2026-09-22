@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-mesh"
+version = "1.0.0"
+description = "LLM clients with a shared model catalog"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Sergey Lizin"}]
+dependencies = ["httpx>=0.27,<1", "pydantic>=2,<3", "json-repair>=0.30,<1", "jsonschema>=4.23,<5"]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9", "pytest-asyncio>=0.23,<1", "respx>=0.21,<1", "build>=1", "twine>=5"]
+
+[project.urls]
+Repository = "https://github.com/SergeyLizin/llm-mesh"
+
+[project.scripts]
+llm-mesh = "llm_mesh.models_catalog:_cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+llm_mesh = ["models.json", "py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
