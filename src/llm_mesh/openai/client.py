@@ -16,12 +16,20 @@ from typing import Any, AsyncIterator, Literal, cast
 import httpx
 
 from llm_mesh._common import (
+    _env_flag,
+    _env_float_default,
+    _env_int_default,
+    _env_is_disabled,
+    _env_nonneg_int,
+    _env_positive_int,
+    _parse_json_dict_env,
     build_text_messages,
+    _args_satisfy_schema,
     finish_reason_opt,
-    check_response_canary,
     post_with_length_retry,
     warn_if_truncated,
 )
+from llm_mesh.base import BaseLLMClient, Capability
 from llm_mesh.openai._common import (
     _PEG_FORMAT_ERROR_RE,
     VENDOR_BODY_KEYS,
@@ -128,47 +136,6 @@ def _stringify_numeric_enums(node: Any) -> Any:
     return node
 
 
-def _args_satisfy_schema(arguments: Any, schema: dict[str, Any] | None) -> bool:
-    """Check parsed tool arguments against their schema. An explicit validation failure allows
-    structured-to-text fallback. Missing schemas, non-mapping arguments, unsupported schemas,
-    and validator errors do not block the response; only a confirmed jsonschema.ValidationError
-    returns False.
-    """
-    if not schema or not isinstance(arguments, dict):
-        return True
-    try:
-        import jsonschema  # noqa: PLC0415 -- import the validator lazily
-    except Exception:
-        return True
-    try:
-        jsonschema.validate(instance=arguments, schema=schema)
-        return True
-    except jsonschema.ValidationError:
-        return False
-    except Exception:
-        # Do not trigger fallback for invalid or unsupported schemas or draft versions; only
-        # reject confirmed argument validation failures.
-        return True
-
-
-def _parse_json_dict_env(name: str) -> dict[str, Any] | None:
-    """Parse an environment variable as a JSON object. Return None for missing, invalid, or
-    non-object values and warn instead of failing client initialization.
-    """
-    raw = get_env(name, "").strip()
-    if not raw:
-        return None
-    try:
-        parsed = json.loads(raw)
-    except ValueError as exc:
-        logger.warning("%s invalid JSON (%s) — ignoring", name, exc)
-        return None
-    if not isinstance(parsed, dict):
-        logger.warning("%s is not a JSON object — ignoring", name)
-        return None
-    return parsed
-
-
 # Detect a gateway rejecting an open dictionary schema. Match the specific schema error so
 # unrelated HTTP failures still propagate through the normal error path.
 _OPEN_OBJECT_REJECTED_RE = re.compile(
@@ -273,12 +240,30 @@ def _is_tool_choice_param_reject(err: "OpenAIError") -> bool:
 
 _TOOL_CHOICE_PARAM_REJECT_RE = re.compile(r"[\"']param[\"']\s*:\s*[\"']tool_choice[\"']", re.IGNORECASE)
 
-class OpenAIClient:
+class OpenAIClient(BaseLLMClient):
     """OpenAI-compatible text, streaming, and structured-output client. base_url is required;
     explicit arguments take precedence over environment aliases. api_key supplies bearer
     authentication, label names logs, and extra_headers extends requests. LLM_MAX_RETRIES and
     LLM_RETRY_BACKOFF_S control retries; LLM_DISABLE_TOOLS selects text emulation.
     """
+
+    CAPABILITIES = frozenset({
+        Capability.TEXT,
+        Capability.STREAM,
+        Capability.STREAM_EVENTS,
+        Capability.STRUCTURED,
+        # Native tools and tool_choice. LLM_DISABLE_TOOLS switches one instance
+        # to text emulation; the class still implements the native path.
+        Capability.TOOLS,
+        # tool_choice "auto" may select among request.tools. A gateway that
+        # ignores them falls back to one forced function.
+        Capability.MULTI_TOOL,
+        # tools_required stays on the native tool loop and does not text-emulate.
+        Capability.TOOLS_REQUIRED,
+        # response_format json_schema/json_object is a declared tier, not the default.
+        Capability.JSON_SCHEMA_MODE,
+        Capability.LENGTH_RETRY,
+    })
 
     def __init__(
         self,
@@ -318,41 +303,29 @@ class OpenAIClient:
                 f"{self.PROVIDER}: missing API key "
                 f"({'/'.join(_API_KEY_ENVS)} are not set)"
             )
-        self._max_retries = int(get_env("LLM_MAX_RETRIES", "3"))
+        self._max_retries = _env_int_default("LLM_MAX_RETRIES", 3, logger=logger)
         self._retry_backoff_s = float(get_env("LLM_RETRY_BACKOFF_S", "1.0"))
         # Limit outbound concurrency with LLM_MAX_CONCURRENT. Create the per-instance semaphore
         # lazily inside the active event loop.
-        self._max_concurrent: int | None = None
-        _mc = get_env("LLM_MAX_CONCURRENT", "").strip()
-        if _mc.isdigit() and int(_mc) > 0:
-            self._max_concurrent = int(_mc)
+        self._max_concurrent = _env_positive_int("LLM_MAX_CONCURRENT")
         self._semaphore: asyncio.Semaphore | None = None
         # Optional LLM_MAX_OUTPUT_TOKENS ceiling. There is no universal OpenAI-compatible
         # model-limit map, so the default leaves clipping to the endpoint.
-        self._max_output_tokens: int | None = None
-        _mo = get_env("LLM_MAX_OUTPUT_TOKENS", "").strip()
-        if _mo.isdigit() and int(_mo) > 0:
-            self._max_output_tokens = int(_mo)
+        self._max_output_tokens = _env_positive_int("LLM_MAX_OUTPUT_TOKENS")
         self._max_tokens_warned = False
         # Optional LLM_MIN_OUTPUT_TOKENS floor reserves enough budget for hidden reasoning plus
         # visible content. Disabled by default. A sufficient initial budget avoids repeated
         # length-limited attempts that spend every token on reasoning.
-        self._min_output_tokens: int | None = None
-        _mn = get_env("LLM_MIN_OUTPUT_TOKENS", "").strip()
-        if _mn.isdigit() and int(_mn) > 0:
-            self._min_output_tokens = int(_mn)
+        self._min_output_tokens = _env_positive_int("LLM_MIN_OUTPUT_TOKENS")
         # On length truncation, retry with a doubled budget up to the ceiling instead of masking
         # incomplete JSON with repair. Defaults: LLM_LENGTH_RETRIES=2 and
-        # LLM_LENGTH_RETRY_CAP=32768.
-        self._length_retries = 2
-        _lr = get_env("LLM_LENGTH_RETRIES", "").strip()
-        if _lr.isdigit():
-            self._length_retries = int(_lr)
+        # LLM_LENGTH_RETRY_CAP=32768. Zero is a valid retry budget.
+        self._length_retries = _env_nonneg_int("LLM_LENGTH_RETRIES", 2)
         self._length_retry_cap = length_retry_cap
-        _lrc = get_env("LLM_LENGTH_RETRY_CAP", "").strip()
-        _lrc_explicit = _lrc.isdigit() and int(_lrc) > 0
+        _lrc = _env_positive_int("LLM_LENGTH_RETRY_CAP")
+        _lrc_explicit = _lrc is not None
         if _lrc_explicit:
-            self._length_retry_cap = int(_lrc)
+            self._length_retry_cap = _lrc
         # A floor at or above the retry cap prevents escalation. Respect an explicitly
         # configured cap and warn; raise an implicit default cap to twice the floor so the
         # default does not silently disable the requested behavior.
@@ -380,33 +353,24 @@ class OpenAIClient:
         if verify is not None:
             self._verify = verify
         else:
-            self._verify = get_env("LLM_VERIFY_SSL", "1").lower() not in (
-                "0", "false", "no",
-            )
+            # No strip: a padded value was never treated as off.
+            self._verify = not _env_is_disabled("LLM_VERIFY_SSL", default="1")
         # Optionally use stream=true for non-streaming APIs, then reconstruct the response from
         # SSE. Receiving bytes during generation avoids reverse-proxy idle timeouts on long
-        # requests.
-        self._stream_transport = get_env(
-            "LLM_STREAM_TRANSPORT", ""
-        ).lower() in ("1", "true", "yes")
+        # requests. No strip, matching the historical parser.
+        self._stream_transport = _env_flag("LLM_STREAM_TRANSPORT", strip=False)
         # LLM_DISABLE_TOOLS selects text-based structured-output emulation for endpoints without
-        # native tools/tool_choice support.
-        self._tools_enabled = (
-            get_env("LLM_DISABLE_TOOLS", "").lower()
-            not in ("1", "true", "yes")
-        )
+        # native tools/tool_choice support. No strip, matching the historical parser.
+        self._tools_enabled = not _env_flag("LLM_DISABLE_TOOLS", strip=False)
         # LLM_SANITIZE_ENUMS stringifies schema enum literals for Google FunctionDeclaration.
         # Disabled by default because it changes the wire schema for every call on this client.
-        self._sanitize_enums = get_env(
-            "LLM_SANITIZE_ENUMS", ""
-        ).strip().lower() in ("1", "true", "yes")
+        self._sanitize_enums = _env_flag("LLM_SANITIZE_ENUMS")
         # LLM_DISABLE_THINKING_FOR_TOOLS disables reasoning only for native function calls whose
         # forced tool_choice conflicts with thinking. Text generation and text fallback retain
         # reasoning.
         self._disable_thinking_for_tools = (
             disable_thinking_for_tools if disable_thinking_for_tools is not None else
-            get_env("LLM_DISABLE_THINKING_FOR_TOOLS", "").strip().lower()
-            in ("1", "true", "yes")
+            _env_flag("LLM_DISABLE_THINKING_FOR_TOOLS")
         )
         # Cache the learned structured tier per instance: strict, then required, then text.
         # LLM_TOOL_CHOICE_PREF may explicitly select the initial tier for endpoints that
@@ -452,31 +416,34 @@ class OpenAIClient:
         # nonexistent catalog declaration.
         self._open_objects_declared = self._open_objects_unsupported
         # Log the affected gateway/model route. Learned state lasts for this client instance; a
-        # measured catalog declaration persists across instances.
+        # measured catalog declaration persists across instances. Per-call model
+        # overrides compute a separate id so concurrent requests cannot race
+        # on this construction-time value.
         self._route_id = f"{self.PROVIDER}/{self._model}"
         # LLM_NO_DEGRADE makes native capability failures visible by rejecting implicit text
         # emulation. Native tool_choice form selection may still proceed; explicitly requested
         # text mode remains valid.
+        # No strip, matching the historical parser.
         self._no_degrade = (no_degrade if no_degrade is not None else
-            get_env("LLM_NO_DEGRADE", "").lower() in ("1", "true", "yes"))
+            _env_flag("LLM_NO_DEGRADE", strip=False))
         # Additional provider body settings apply to text and structured requests.
         # LLM_DISABLE_REASONING controls reasoning-off behavior, LLM_REASONING_OFF supplies the
         # route dialect, and LLM_EXTRA_BODY supplies other vendor settings.
         self._extra_body: dict[str, Any] = {}
-        _parsed_extra = _parse_json_dict_env("LLM_EXTRA_BODY")
+        _parsed_extra = _parse_json_dict_env("LLM_EXTRA_BODY", logger=logger)
         if _parsed_extra is not None:
             self._extra_body.update(_parsed_extra)
         # Merge LLM_EXTRA_HEADERS into HTTP headers, for example a provider-specific project
         # identifier.
-        _parsed_headers = _parse_json_dict_env("LLM_EXTRA_HEADERS")
+        _parsed_headers = _parse_json_dict_env("LLM_EXTRA_HEADERS", logger=logger)
         if _parsed_headers is not None:
             self._extra_headers.update({str(k): str(v) for k, v in _parsed_headers.items()})
         # LLM_REASONING_ON supplies the gateway's explicit enabling dialect. There is no
         # universal payload that reliably enables reasoning across providers.
         self._reasoning_on_body: dict[str, Any] = (
-            _parse_json_dict_env("LLM_REASONING_ON") or {}
+            _parse_json_dict_env("LLM_REASONING_ON", logger=logger) or {}
         )
-        off_body = _parse_json_dict_env("LLM_REASONING_OFF")
+        off_body = _parse_json_dict_env("LLM_REASONING_OFF", logger=logger)
         self._reasoning_off_body = off_body or {}
         self._reasoning_off_declared = off_body is not None
         self._dtft_no_off_warned = False
@@ -485,8 +452,7 @@ class OpenAIClient:
                 self._extra_body[key].update(value)
             else:
                 self._extra_body[key] = value
-        _disable_r = get_env("LLM_DISABLE_REASONING", "").strip().lower()
-        if _disable_r in ("1", "true", "yes") and self._reasoning_off_declared:
+        if _env_flag("LLM_DISABLE_REASONING") and self._reasoning_off_declared:
             for key in self._reasoning_on_body:
                 self._extra_body.pop(key, None)
             self._extra_body.update(self._reasoning_off_body)
@@ -505,6 +471,9 @@ class OpenAIClient:
         # LLM_FORCE_TEMPERATURE overrides every request for gateways that accept only a fixed
         # temperature.
         self._no_vendor_keys = False
+        # Real OpenAI omits stream usage unless stream_options.include_usage
+        # is set. A gateway that rejects the field is remembered here.
+        self._no_stream_usage = False
         self._force_temperature: float | None = None
         _ft = get_env("LLM_FORCE_TEMPERATURE", "").strip()
         if _ft:
@@ -514,8 +483,10 @@ class OpenAIClient:
                 logger.warning("LLM_FORCE_TEMPERATURE is not a number (%r) — ignoring", _ft)
         # Create httpx.AsyncClient on the first request; constructor failures must not leave an
         # uncloseable transport behind.
-        self._http_timeout: float = http_timeout if http_timeout is not None else float(
-            get_env("LLM_HTTP_TIMEOUT", "600") or "600")
+        self._http_timeout: float = (
+            http_timeout if http_timeout is not None
+            else _env_float_default("LLM_HTTP_TIMEOUT", 600.0, logger=logger)
+        )
         self._client: httpx.AsyncClient | None = None
 
     @staticmethod
@@ -526,36 +497,8 @@ class OpenAIClient:
                 return val
         return ""
 
-    # Shared client helpers.
-
-    def _ensure_http(self) -> httpx.AsyncClient:
-        if self._client is None:
-            self._client = httpx.AsyncClient(
-                timeout=self._http_timeout, verify=self._verify,
-            )
-        return self._client
-
-    def _check_response_canary(self, response_text: str, *, context: str) -> None:
-        """Scan generated output for the canary, complementing prompt injection and covering
-        intermediate calls as well as final responses.
-        """
-        check_response_canary(
-            response_text,
-            context=f"{self.PROVIDER}.{context}",
-        )
-
     def _messages(self, request: LLMRequest) -> list[dict[str, Any]]:
         return build_text_messages(request)
-
-    def _ensure_semaphore(self) -> asyncio.Semaphore | None:
-        """Create and reuse the semaphore lazily inside the active event loop, even when the client
-        was constructed outside it.
-        """
-        if self._max_concurrent is None:
-            return None
-        if self._semaphore is None:
-            self._semaphore = asyncio.Semaphore(self._max_concurrent)
-        return self._semaphore
 
     def _clip_max_tokens(self, requested: int) -> int:
         """Apply the optional token floor, then the hard ceiling. The ceiling wins if configuration
@@ -573,10 +516,13 @@ class OpenAIClient:
             self._max_tokens_warned = True
         return self._max_output_tokens
 
-    async def _post(self, body: dict[str, Any]) -> dict[str, Any]:
-        """POST chat/completions under the optional concurrency semaphore."""
-        # Merge vendor body fields in one place for text and structured requests without
-        # overwriting explicit body values.
+    def _prepare_outbound_body(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Apply the same vendor-body merge the interactive POST uses.
+
+        Batch submission never calls ``_post``, so the merge has to live in one
+        place. Otherwise extra_body, thinking-off, and a forced temperature would
+        diverge between a live call and a JSONL line.
+        """
         for k, v in self._extra_body.items():
             if self._no_vendor_keys and k in VENDOR_BODY_KEYS:
                 continue
@@ -585,6 +531,11 @@ class OpenAIClient:
             self._apply_thinking_off_for_tools(body)
         if self._force_temperature is not None and "temperature" in body:
             body["temperature"] = self._force_temperature
+        return body
+
+    async def _post(self, body: dict[str, Any]) -> dict[str, Any]:
+        """POST chat/completions under the optional concurrency semaphore."""
+        self._prepare_outbound_body(body)
         sem = self._ensure_semaphore()
         if sem is None:
             return await self._post_inner(body)
@@ -609,6 +560,40 @@ class OpenAIClient:
             logger=logger,
         )
 
+    def _apply_stream_usage(self, body: dict[str, Any]) -> None:
+        """Ask for a trailing usage chunk.
+
+        Real OpenAI omits ``usage`` unless ``stream_options.include_usage`` is
+        set, so ``Complete.usage`` stays None. ``setdefault`` leaves a caller
+        supplied value alone. A gateway that rejects the field is remembered
+        on this instance by ``_drop_stream_usage``.
+        """
+        if self._no_stream_usage:
+            return
+        body.setdefault("stream_options", {"include_usage": True})
+
+    def _drop_stream_usage(self, status: int, detail: str, body: dict[str, Any]) -> bool:
+        """Learn a stream_options rejection and strip it for one retry.
+
+        Same shape as the vendor-key fallback: only an HTTP 400 that names an
+        unknown field, and only when this request actually sent the field.
+        """
+        if (
+            status != 400
+            or self._no_stream_usage
+            or "stream_options" not in body
+            or not _is_unknown_body_field_error(detail)
+        ):
+            return False
+        logger.info(
+            "%s: gateway rejects stream_options (%s) — retrying without "
+            "include_usage (learned per instance)",
+            self.PROVIDER, detail[:120],
+        )
+        self._no_stream_usage = True
+        body.pop("stream_options", None)
+        return True
+
     async def _stream_and_reconstruct(
         self, headers: dict[str, str], body: dict[str, Any]
     ) -> _BufferedStreamResponse:
@@ -617,7 +602,18 @@ class OpenAIClient:
         reverse-proxy connections active during generation.
         """
         stream_body = {**body, "stream": True}
-        stream_body.setdefault("stream_options", {"include_usage": True})
+        self._apply_stream_usage(stream_body)
+        for _attempt in range(2):
+            result = await self._consume_reconstructed_stream(headers, stream_body, body)
+            if result.status_code < 400 or not self._drop_stream_usage(
+                result.status_code, result.text, stream_body,
+            ):
+                return result
+        return result
+
+    async def _consume_reconstructed_stream(
+        self, headers: dict[str, str], stream_body: dict[str, Any], body: dict[str, Any],
+    ) -> _BufferedStreamResponse:
         async with self._ensure_http().stream(
             "POST", self.URL, headers=headers, json=stream_body
         ) as r:
@@ -939,12 +935,20 @@ class OpenAIClient:
             cache_nested_field=self._cache_nested_field,
         )
 
+    def _effective_model(self, request: LLMRequest) -> str:
+        """Request model, else the model configured on this client."""
+        return request.model or self._model
+
+    def _route_id_for(self, request: LLMRequest) -> str:
+        """Route label for this call. Do not write it back onto the client."""
+        return f"{self.PROVIDER}/{self._effective_model(request)}"
+
     async def generate_text(self, request: LLMRequest) -> LLMResponse:
         """Generate plain text without tools. Return message.content as LLMResponse.text with empty
         arguments; callers may parse structured text themselves.
         """
         body: dict[str, Any] = {
-            "model": self._model,
+            "model": self._effective_model(request),
             "messages": self._messages(request),
             "temperature": request.temperature,
             "max_tokens": self._clip_max_tokens(request.max_tokens),
@@ -957,6 +961,14 @@ class OpenAIClient:
             if request.length_retry
             else self._post(body)
         )
+        return self._text_response(data, request)
+
+    def _text_response(
+        self, data: dict[str, Any], request: LLMRequest, *, scan_canary: bool = True,
+    ) -> LLMResponse:
+        """Parse a plain chat completion. ``scan_canary=False`` is the batch path:
+        stored batch output is not a live turn, and GigaChat batch does not scan either.
+        """
         choice = data["choices"][0] or {}
         msg = choice.get("message") or {}
         content = msg.get("content") or ""
@@ -971,13 +983,14 @@ class OpenAIClient:
             provider=self.PROVIDER,
             logger=logger,
         )
-        self._check_response_canary(content, context="generate_text")
+        if scan_canary:
+            self._check_response_canary(content, context="generate_text")
         return LLMResponse(
             arguments={},
             text=content,
             reasoning_content=self._reasoning_content_of(msg),
             finish_reason=finish_reason_opt(data),
-            model=str(data.get("model", self._model)),
+            model=str(data.get("model", self._effective_model(request))),
             usage=self._usage(data),
             raw=data,
         )
@@ -989,7 +1002,7 @@ class OpenAIClient:
         for function-calling output.
         """
         body: dict[str, Any] = {
-            "model": self._model,
+            "model": self._effective_model(request),
             "messages": self._messages(request),
             "temperature": request.temperature,
             "max_tokens": self._clip_max_tokens(request.max_tokens),
@@ -1013,27 +1026,33 @@ class OpenAIClient:
 
     async def _do_stream(self, body: dict[str, Any]) -> AsyncIterator[LLMStreamChunk]:
         headers = {"Authorization": f"Bearer {self._key}", **self._extra_headers}
+        self._apply_stream_usage(body)
         agg: list[str] = []
+        retry_without_usage = False
         try:
             async with self._ensure_http().stream(
                 "POST", self.URL, headers=headers, json=body
             ) as r:
                 if r.status_code >= 400:
                     raw = (await r.aread()).decode("utf-8", "replace")[:300]
-                    if r.status_code in (401, 403):
+                    if self._drop_stream_usage(r.status_code, raw, body):
+                        retry_without_usage = True
+                    elif r.status_code in (401, 403):
                         raise LLMAuthError(f"{self.PROVIDER} stream {r.status_code}: {raw}")
-                    raise OpenAIError(f"{self.PROVIDER} stream {r.status_code}: {raw}")
-                request_id = r.headers.get("x-request-id")
-                first = True
-                async for payload in iter_sse_payloads(r.aiter_lines()):
-                    chunk = chunk_from_sse_payload(
-                        payload, request_id=request_id, first=first,
-                        reasoning_field=self._reasoning_field or None,
-                    )
-                    if chunk.delta_text:
-                        agg.append(chunk.delta_text)
-                    yield chunk
-                    first = False
+                    else:
+                        raise OpenAIError(f"{self.PROVIDER} stream {r.status_code}: {raw}")
+                else:
+                    request_id = r.headers.get("x-request-id")
+                    first = True
+                    async for payload in iter_sse_payloads(r.aiter_lines()):
+                        chunk = chunk_from_sse_payload(
+                            payload, request_id=request_id, first=first,
+                            reasoning_field=self._reasoning_field or None,
+                        )
+                        if chunk.delta_text:
+                            agg.append(chunk.delta_text)
+                        yield chunk
+                        first = False
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError,
                 httpx.NetworkError, httpx.RemoteProtocolError) as exc:
             raise LLMTimeoutError(f"{self.PROVIDER} stream transient error: {exc}") from exc
@@ -1041,6 +1060,9 @@ class OpenAIClient:
             # Scan partial output even when the stream is interrupted; incomplete text can
             # contain a canary leak.
             self._check_response_canary("".join(agg), context="generate_stream")
+        if retry_without_usage:
+            async for chunk in self._do_stream(body):
+                yield chunk
 
     def _open_objects_source(self) -> str:
         """Describe whether the route restriction was declared or learned from a 400 response."""
@@ -1063,7 +1085,7 @@ class OpenAIClient:
         """
         schema = self._adapt_schema(schema)
         body: dict[str, Any] = {
-            "model": self._model,
+            "model": self._effective_model(request),
             "messages": self._messages(request),
             "tools": [{
                 "type": "function",
@@ -1085,6 +1107,50 @@ class OpenAIClient:
         self._apply_thinking_off_for_tools(body)
         return body
 
+    def _batch_tool_choice(self, fn: str) -> Any:
+        """Tool choice for one batch line. A batch cannot walk the interactive tier
+        ladder, so this is the first forced form that path would send: a named
+        function, or ``required``/``auto`` when the route has already settled there.
+        """
+        if self._tool_choice_pref == "required":
+            return "required"
+        if self._tool_choice_pref == "auto":
+            return "auto"
+        return {"type": "function", "function": {"name": fn}}
+
+    def build_completion_body(self, request: LLMRequest, *, structured: bool) -> dict[str, Any]:
+        """Body a non-batch call would POST for this request.
+
+        ``structured=False`` is the ``generate_text`` body, not ``_text_json_body``.
+        That helper is the text-emulation tier for structured output and would
+        change a plain-text batch. ``structured=True`` is the forced single-function
+        tier (``_fc_body``). Both then pass through ``_prepare_outbound_body``, which
+        is what ``_post`` applies before the wire.
+        """
+        if structured:
+            fn = request.function_name
+            schema = request.schema_ if isinstance(request.schema_, dict) else {
+                "type": "object", "properties": {},
+            }
+            body = self._fc_body(request, fn, schema, self._batch_tool_choice(fn))
+        else:
+            body = {
+                "model": self._effective_model(request),
+                "messages": self._messages(request),
+                "temperature": request.temperature,
+                "max_tokens": self._clip_max_tokens(request.max_tokens),
+                **self._reasoning_body_kwargs(request),
+            }
+        return self._prepare_outbound_body(body)
+
+    def response_from_payload(
+        self, payload: dict[str, Any], request: LLMRequest, structured: bool,
+    ) -> LLMResponse:
+        """Parse a chat completion the interactive path would return, without the canary."""
+        if structured:
+            return self._structured_response(payload, request, scan_canary=False)
+        return self._text_response(payload, request, scan_canary=False)
+
     def _text_json_body(self, request: LLMRequest, fn: str) -> dict[str, Any]:
         """Build text-based structured-output emulation without tools. Include the schema in the
         prompt so the model knows the required keys; parse JSON from content afterwards.
@@ -1104,7 +1170,7 @@ class OpenAIClient:
             ),
         })
         return {
-            "model": self._model,
+            "model": self._effective_model(request),
             "messages": self._messages(instructed),
             "temperature": request.temperature,
             "max_tokens": self._clip_max_tokens(request.max_tokens),
@@ -1139,9 +1205,9 @@ class OpenAIClient:
         return None
 
     def _structured_response(
-        self, data: dict[str, Any], request: LLMRequest
+        self, data: dict[str, Any], request: LLMRequest, *, scan_canary: bool = True,
     ) -> LLMResponse:
-        """Parse a function-call response into LLMResponse and scan it for the canary."""
+        """Parse a function-call response into LLMResponse and, on the live path, scan it."""
         choice = data["choices"][0] or {}
         msg = choice.get("message") or {}
         warn_if_truncated(
@@ -1169,20 +1235,24 @@ class OpenAIClient:
                 )
             arguments = coerced
         # Scan both serialized tool arguments and textual content for canary leakage.
-        self._check_response_canary(msg.get("content") or "", context="generate_structured.text")
-        try:
-            self._check_response_canary(
-                json.dumps(arguments, ensure_ascii=False, default=str),
-                context="generate_structured.args",
-            )
-        except Exception:
-            pass
+        # Batch results skip this: the scan belongs to the live conversation, and a
+        # stored line must not grow a warning the interactive client would not have
+        # attached to that payload on the batch path.
+        if scan_canary:
+            self._check_response_canary(msg.get("content") or "", context="generate_structured.text")
+            try:
+                self._check_response_canary(
+                    json.dumps(arguments, ensure_ascii=False, default=str),
+                    context="generate_structured.args",
+                )
+            except Exception:
+                pass
         return LLMResponse(
             arguments=arguments,
             text=msg.get("content") or None,
             reasoning_content=self._reasoning_content_of(msg),
             finish_reason=finish_reason_opt(data),
-            model=str(data.get("model", self._model)),
+            model=str(data.get("model", self._effective_model(request))),
             usage=self._usage(data),
             raw=data,
         )
@@ -1204,7 +1274,7 @@ class OpenAIClient:
             logger.info(
                 # Use one consistent served-tier marker across all modes; keep the mode a
                 # separate token for log consumers.
-                "%s: structured served by tier text (%s)", self._route_id, reason,
+                "%s: structured served by tier text (%s)", self._route_id_for(request), reason,
             )
         self._last_served_tier = "text"
         return self._structured_response(
@@ -1227,7 +1297,7 @@ class OpenAIClient:
             "exhausted with the same payload. One attempt through the text tier: it omits "
             "tools and therefore distinguishes «gateway outage» and «gateway rejected "
             "tool payload» (route %s)",
-            self.PROVIDER, tier, _code, self._route_id,
+            self.PROVIDER, tier, _code, self._route_id_for(request),
         )
         return await self._serve_text_tier(
             request, fn, reason=f"gateway {_code} on tool request (tier {tier})",
@@ -1263,7 +1333,7 @@ class OpenAIClient:
         else:
             response_format = {"type": "json_object"}
         return {
-            "model": self._model,
+            "model": self._effective_model(request),
             "messages": self._messages(instructed),
             "temperature": request.temperature,
             "max_tokens": self._clip_max_tokens(request.max_tokens),
@@ -1282,7 +1352,7 @@ class OpenAIClient:
         # failure may fall through to text and must not be counted as a response_format success.
         logger.info(
             "%s: structured entering tier response_format (dialect %s) (%s)",
-            self._route_id, self._response_format, reason,
+            self._route_id_for(request), self._response_format, reason,
         )
         data = await self._post_with_length_retry(
             self._response_format_body(request, fn)
@@ -1298,7 +1368,7 @@ class OpenAIClient:
             # Keep the tier name separate from its dialect so all served-tier log lines share
             # one format.
             "%s: structured served by tier response_format (dialect %s)",
-            self._route_id, self._response_format,
+            self._route_id_for(request), self._response_format,
         )
         return result
 
@@ -1327,7 +1397,7 @@ class OpenAIClient:
                 _paths = ", ".join(_request_open_object_paths(request)) or "?"
                 raise LLMValidationError(
                     f"{self.PROVIDER}: native tool-loop (tools_required) "
-                    f"is unavailable — route {self._route_id} does not accept "
+                    f"is unavailable — route {self._route_id_for(request)} does not accept "
                     f"open object schemas at nodes [{_paths}] "
                     f"({self._open_objects_source()})"
                 )
@@ -1347,11 +1417,11 @@ class OpenAIClient:
                     "%s: native tool-loop — gateway rejected an open object in the "
                     "schema (400) at nodes [%s]; rejecting the request, no substitution with "
                     "text emulation (decision cached for route %s)",
-                    self.PROVIDER, _paths, self._route_id,
+                    self.PROVIDER, _paths, self._route_id_for(request),
                 )
                 raise LLMValidationError(
                     f"{self.PROVIDER}: native tool-loop (tools_required) "
-                    f"is unavailable — route {self._route_id} does not accept "
+                    f"is unavailable — route {self._route_id_for(request)} does not accept "
                     f"open object schemas at nodes [{_paths}]"
                 ) from exc
             # Tool calls indicate a native function-call turn; a response without them is the
@@ -1378,7 +1448,7 @@ class OpenAIClient:
                 "tool tiers",
                 self.PROVIDER,
                 ", ".join(_request_open_object_paths(request)) or "?",
-                self._route_id,
+                self._route_id_for(request),
                 self._open_objects_source(),
             )
             # Do not pass explicit=True for an implicit schema fallback. That flag belongs only
@@ -1428,7 +1498,7 @@ class OpenAIClient:
                         "models.json",
                         self.PROVIDER,
                         ", ".join(_request_open_object_paths(request)) or "?",
-                        self._route_id,
+                        self._route_id_for(request),
                     )
                     return await self._serve_text_tier(
                         request, request.function_name or "build_artifact",
@@ -1450,7 +1520,7 @@ class OpenAIClient:
                 logger.info(
                     "%s: tool template parser cannot be built (400 jinja grammar) — "
                     "fallback structured → text mode",
-                    self._route_id,
+                    self._route_id_for(request),
                 )
                 resp = None
             if resp is not None:
@@ -1476,7 +1546,7 @@ class OpenAIClient:
                 "%s: multi-tool (tool_choice=auto) %s — "
                 "falling back to a single forced function '%s' (this call only, "
                 "not cached)",
-                self._route_id,
+                self._route_id_for(request),
                 (f"returned unparseable arguments ({corrupted})" if corrupted
                  else "did not return tool_call"),
                 request.function_name,
@@ -1513,7 +1583,7 @@ class OpenAIClient:
                         raise
                     logger.info(
                         "%s: tier response_format did not produce a parseable object "
-                        "(%s) — fallback → text", self._route_id, exc,
+                        "(%s) — fallback → text", self._route_id_for(request), exc,
                     )
                     self._tool_choice_pref = "text"
                     return await self._serve_text_tier(
@@ -1544,7 +1614,7 @@ class OpenAIClient:
                         "cached for route %s)",
                         self.PROVIDER, mode,
                         ", ".join(_request_open_object_paths(request)) or "?",
-                        self._route_id,
+                        self._route_id_for(request),
                     )
                     return await self._serve_text_tier(
                         request, fn,
@@ -1557,7 +1627,7 @@ class OpenAIClient:
                     next_mode = order[idx + 1] if idx + 1 < len(order) else "text"
                     logger.info(
                         "%s: tool_choice=%s rejected (%s), fallback → %s",
-                        self._route_id, mode,
+                        self._route_id_for(request), mode,
                         "unsupported tool_choice value" if (
                             _is_tool_choice_unsupported_error(exc) or _is_tool_choice_param_reject(exc)
                         )
@@ -1572,7 +1642,7 @@ class OpenAIClient:
                     logger.info(
                         "%s: tool_choice=%s — tool template parser cannot be built "
                         "(400 jinja grammar), fallback → text mode",
-                        self._route_id, mode,
+                        self._route_id_for(request), mode,
                     )
                     self._tool_choice_pref = "text"
                     return await self._serve_text_tier(
@@ -1586,7 +1656,7 @@ class OpenAIClient:
                     logger.info(
                         "%s: tool_choice=%s — PEG parser could not handle the volume of "
                         "tool-call output (500 peg-format), fallback → text mode",
-                        self._route_id, mode,
+                        self._route_id_for(request), mode,
                     )
                     self._tool_choice_pref = "text"
                     return await self._serve_text_tier(
@@ -1625,7 +1695,7 @@ class OpenAIClient:
                 logger.info(
                     "%s: tool_choice=%s accepted (200), but the model did not return "
                     "recognizable tool_call/JSON (%s) — fallback → %s",
-                    self._route_id, mode, exc, next_mode,
+                    self._route_id_for(request), mode, exc, next_mode,
                 )
                 if next_mode == "text":
                     self._tool_choice_pref = "text"
@@ -1643,7 +1713,7 @@ class OpenAIClient:
             self._last_served_tier = mode
             # Identify the full provider/model route: a provider label alone cannot distinguish
             # models sharing a gateway.
-            logger.info("%s: structured served by tier %s", self._route_id, mode)
+            logger.info("%s: structured served by tier %s", self._route_id_for(request), mode)
             return result
 
         # Unreachable because text is terminal; retained defensively.
@@ -1730,7 +1800,7 @@ class OpenAIClient:
             for t in request.tools or []
         ]
         body: dict[str, Any] = {
-            "model": self._model,
+            "model": self._effective_model(request),
             "messages": self._messages(request),
             "tools": tools,
             "tool_choice": "required" if self._tool_choice_pref == "required" else "auto",
@@ -1790,7 +1860,7 @@ class OpenAIClient:
                     }],
                     reasoning_content=self._reasoning_content_of(msg),
                     finish_reason=finish_reason_opt(data),
-                    model=str(data.get("model", self._model)),
+                    model=str(data.get("model", self._effective_model(request))),
                     usage=self._usage(data),
                     raw=data,
                 )
@@ -1812,7 +1882,7 @@ class OpenAIClient:
                 text=msg.get("content") or None,
                 reasoning_content=self._reasoning_content_of(msg),
                 finish_reason=finish_reason_opt(data),
-                model=str(data.get("model", self._model)),
+                model=str(data.get("model", self._effective_model(request))),
                 usage=self._usage(data),
                 raw=data,
             )
@@ -1862,7 +1932,7 @@ class OpenAIClient:
             tool_calls=all_calls,
             reasoning_content=self._reasoning_content_of(msg),
             finish_reason=finish_reason_opt(data),
-            model=str(data.get("model", self._model)),
+            model=str(data.get("model", self._effective_model(request))),
             usage=self._usage(data),
             raw=data,
         )
@@ -2012,11 +2082,6 @@ class OpenAIClient:
                 f"extract JSON from content ({content[:200]!r}): {exc}"
             ) from exc
 
-    async def aclose(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
-
     async def generate_stream_events(
         self, request: LLMRequest
     ) -> AsyncIterator[StreamEvent]:
@@ -2027,7 +2092,7 @@ class OpenAIClient:
         follows the text streaming path.
         """
         body: dict[str, Any] = {
-            "model": self._model,
+            "model": self._effective_model(request),
             "messages": self._messages(request),
             "temperature": request.temperature,
             "max_tokens": self._clip_max_tokens(request.max_tokens),
@@ -2056,64 +2121,70 @@ class OpenAIClient:
         network or HTTP failure, emit Error and re-raise the corresponding transport exception.
         """
         headers = {"Authorization": f"Bearer {self._key}", **self._extra_headers}
+        self._apply_stream_usage(body)
         agg: list[str] = []
+        retry_without_usage = False
         try:
             async with self._ensure_http().stream(
                 "POST", self.URL, headers=headers, json=body
             ) as r:
                 if r.status_code >= 400:
                     raw = (await r.aread()).decode("utf-8", "replace")[:300]
-                    if r.status_code in (401, 403):
-                        err = LLMAuthError(
-                            f"{self.PROVIDER} stream {r.status_code}: {raw}"
-                        )
+                    if self._drop_stream_usage(r.status_code, raw, body):
+                        retry_without_usage = True
                     else:
-                        err = OpenAIError(
-                            f"{self.PROVIDER} stream {r.status_code}: {raw}"
+                        if r.status_code in (401, 403):
+                            err = LLMAuthError(
+                                f"{self.PROVIDER} stream {r.status_code}: {raw}"
+                            )
+                        else:
+                            err = OpenAIError(
+                                f"{self.PROVIDER} stream {r.status_code}: {raw}"
+                            )
+                        yield Error(error=str(err), error_type=type(err).__name__)
+                        raise err
+                else:
+                    request_id = r.headers.get("x-request-id")
+                    tool_acc = ToolCallAccumulator()
+                    finish_reason: str | None = None
+                    usage: LLMUsage | None = None
+                    async for payload in iter_sse_payloads(r.aiter_lines()):
+                        # Remember finish_reason and usage from final chunks; emit exactly one
+                        # terminal event after DONE.
+                        choices = payload.get("choices")
+                        choice = (
+                            choices[0]
+                            if isinstance(choices, list) and choices
+                            else {}
                         )
-                    yield Error(error=str(err), error_type=type(err).__name__)
-                    raise err
-                request_id = r.headers.get("x-request-id")
-                tool_acc = ToolCallAccumulator()
-                finish_reason: str | None = None
-                usage: LLMUsage | None = None
-                async for payload in iter_sse_payloads(r.aiter_lines()):
-                    # Remember finish_reason and usage from final chunks; emit exactly one
-                    # terminal event after DONE.
-                    choices = payload.get("choices")
-                    choice = (
-                        choices[0]
-                        if isinstance(choices, list) and choices
-                        else {}
-                    )
-                    if isinstance(choice, dict):
-                        fr = choice.get("finish_reason")
-                        if fr:
-                            finish_reason = fr
-                    if payload.get("usage"):
-                        usage = LLMUsage.from_raw(
-                            payload["usage"],
-                            cache_hit_field=self._cache_hit_field,
-                            cache_miss_field=self._cache_miss_field,
-                            cache_nested_field=self._cache_nested_field,
-                        )
-                    for ev in events_from_sse_payload(
-                        payload,
+                        if isinstance(choice, dict):
+                            fr = choice.get("finish_reason")
+                            if fr:
+                                finish_reason = fr
+                        if payload.get("usage"):
+                            usage = LLMUsage.from_raw(
+                                payload["usage"],
+                                cache_hit_field=self._cache_hit_field,
+                                cache_miss_field=self._cache_miss_field,
+                                cache_nested_field=self._cache_nested_field,
+                            )
+                        for ev in events_from_sse_payload(
+                            payload,
+                            request_id=request_id,
+                            tool_acc=tool_acc,
+                            reasoning_field=self._reasoning_field,
+                        ):
+                            if isinstance(ev, ContentDelta):
+                                agg.append(ev.delta_text)
+                            yield ev
+                    # After DONE, stop tool calls in first-seen index order, then emit Complete.
+                    for stop in tool_acc.finalize(request_id=request_id):
+                        yield stop
+                    yield Complete(
+                        finish_reason=finish_reason,
+                        usage=usage,
                         request_id=request_id,
-                        tool_acc=tool_acc,
-                        reasoning_field=self._reasoning_field,
-                    ):
-                        if isinstance(ev, ContentDelta):
-                            agg.append(ev.delta_text)
-                        yield ev
-                # After DONE, stop tool calls in first-seen index order, then emit Complete.
-                for stop in tool_acc.finalize(request_id=request_id):
-                    yield stop
-                yield Complete(
-                    finish_reason=finish_reason,
-                    usage=usage,
-                    request_id=request_id,
-                )
+                    )
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError,
                 httpx.NetworkError, httpx.RemoteProtocolError) as exc:
             err = LLMTimeoutError(f"{self.PROVIDER} stream transient error: {exc}")
@@ -2122,6 +2193,9 @@ class OpenAIClient:
         finally:
             # Scan partial output for canaries even when the stream is interrupted.
             self._check_response_canary("".join(agg), context="generate_stream_events")
+        if retry_without_usage:
+            async for ev in self._do_stream_events(body):
+                yield ev
 
     def _apply_thinking_off_for_tools(self, body: dict[str, Any]) -> None:
         """Apply reasoning_off to a function-calling body in place when disable_thinking_for_tools

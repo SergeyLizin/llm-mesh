@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from llm_mesh._common import _env_float_default
 from llm_mesh.config import CONNECTION_ENV, get_env, read_options
 import threading
 from typing import Any, Sequence, cast
@@ -20,8 +21,8 @@ from .client import (
     GIGACHAT_BASE_URL,
     GigaChatAsyncClient,
 )
-from ._common import simplify_schema_for_gigachat
-from llm_mesh._common import finish_reason_opt
+from ._common import simplify_schema_for_gigachat, split_reasoning_content
+from llm_mesh._common import _env_flag, finish_reason_opt
 from llm_mesh.types import (
     LLMAuthError,
     LLMError,
@@ -81,8 +82,12 @@ class GigaChatBatchClient:
         self._token = token
         self._base_url = (base_url or getattr(auth, "_api_url", None) or get_env("LLM_BASE_URL", GIGACHAT_BASE_URL)).rstrip("/") + "/"
         self._external_client = http_client
+        self._owned_client: httpx.AsyncClient | None = None
         self._verify = verify if verify is not None else get_env("LLM_VERIFY_SSL", "false").lower() not in ("0", "false", "no")
-        self._timeout = httpx.Timeout(timeout_s if timeout_s is not None else float(get_env("LLM_HTTP_TIMEOUT", "120")))
+        self._timeout = httpx.Timeout(
+            timeout_s if timeout_s is not None
+            else _env_float_default("LLM_HTTP_TIMEOUT", 120.0, logger=logger)
+        )
         self._poll_interval = (
             poll_interval_s
             if poll_interval_s is not None
@@ -109,13 +114,28 @@ class GigaChatBatchClient:
             return await self._auth._ensure_token()
         raise LLMAuthError("GigaChatBatchClient: no token source")
 
-    async def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    def _http(self) -> httpx.AsyncClient:
+        """Return the caller-owned client, or the one this instance keeps open.
+
+        A client per request paid a TLS handshake on every poll. The owned
+        client lives until ``aclose``. A caller-owned client is never closed.
+        """
         if self._external_client is not None:
-            return await self._external_client.request(method, path, **kwargs)
-        async with httpx.AsyncClient(
-            base_url=self._base_url, verify=self._verify, timeout=self._timeout
-        ) as client:
-            return await client.request(method, path, **kwargs)
+            return self._external_client
+        if self._owned_client is None:
+            self._owned_client = httpx.AsyncClient(
+                base_url=self._base_url, verify=self._verify, timeout=self._timeout,
+            )
+        return self._owned_client
+
+    async def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        return await self._http().request(method, path, **kwargs)
+
+    async def aclose(self) -> None:
+        """Close the client this instance created. A caller-owned client is left open."""
+        if self._owned_client is not None:
+            await self._owned_client.aclose()
+            self._owned_client = None
 
     @staticmethod
     def _raise_for_status(response: httpx.Response, context: str) -> None:
@@ -217,7 +237,8 @@ class GigaChatBatchClient:
         interval = poll_interval if poll_interval is not None else self._poll_interval
         deadline = max_wait if max_wait is not None else self._max_wait
         terminal = {"completed", "failed", "expired", "cancelled"}
-        start = asyncio.get_event_loop().time()
+        loop = asyncio.get_running_loop()
+        start = loop.time()
         while True:
             data = await self.get_batch(batch_id)
             status = data.get("status", "unknown")
@@ -225,7 +246,7 @@ class GigaChatBatchClient:
                 if status != "completed":
                     raise GigaChatBatchError(f"Batch {batch_id} finished with status: {status}")
                 return data
-            if asyncio.get_event_loop().time() - start >= deadline:
+            if loop.time() - start >= deadline:
                 raise LLMTimeoutError(
                     f"Batch {batch_id} did not complete within {deadline}s (status: {status})"
                 )
@@ -296,9 +317,15 @@ class GigaChatBatchClient:
         model = str(result.get("model", fallback_model))
 
         if request.mode == "text":
+            field = message.get("reasoning_content")
+            visible, reasoning = split_reasoning_content(
+                message.get("content") or "",
+                field if isinstance(field, str) else None,
+            )
             return LLMResponse(
                 arguments={},
-                text=message.get("content", "") or "",
+                text=visible,
+                reasoning_content=reasoning,
                 finish_reason=finish_reason_opt(result),
                 model=model,
                 usage=usage,
@@ -348,8 +375,11 @@ class GigaChatBatchClient:
             return []
 
         resolved_model = model or (self._auth.model if self._auth is not None else "GigaChat")
+        # A line may name its own model. The batch default covers the rest.
+        # The Batch API accepts a different model on each JSONL line.
+        line_models = [req.model or resolved_model for req in requests]
         lines = [
-            self._build_chat_line(str(i), req, resolved_model)
+            self._build_chat_line(str(i), req, line_models[i])
             for i, req in enumerate(requests)
         ]
         jsonl = self.build_jsonl(lines)
@@ -377,7 +407,7 @@ class GigaChatBatchClient:
             else:
                 try:
                     response = self._response_from_result(
-                        entry.get("result", {}), req, resolved_model
+                        entry.get("result", {}), req, line_models[i]
                     )
                 except LLMError as parse_exc:
                     err = parse_exc
@@ -396,14 +426,17 @@ class GigaChatBatchClient:
 
 
 class BatchingLLMClient:
-    """Coalesce concurrent text or structured calls into real GigaChat batches. Intended for
-    offline workloads that tolerate the collection window and batch polling latency. Preserve
-    the individual client interface and deliver each result to its waiting caller.
+    """Coalesce concurrent text or structured calls into one provider batch.
+
+    The batch client only has to expose ``run_chat_batch``. Intended for offline
+    workloads that tolerate the collection window and batch polling latency.
+    Preserve the individual client interface and deliver each result to its waiting
+    caller.
     """
 
     def __init__(
         self,
-        batch_client: GigaChatBatchClient,
+        batch_client: Any,
         *,
         model: str,
         max_batch_size: int | None = None,
@@ -420,6 +453,9 @@ class BatchingLLMClient:
         self._queue: asyncio.Queue[tuple[LLMRequest, asyncio.Future]] | None = None
         self._worker: asyncio.Task | None = None
         self._inflight: set[asyncio.Task] = set()
+        # Every future handed to a caller. ``aclose`` fails the ones still waiting,
+        # including items sitting in the queue or in a worker-local batch.
+        self._pending: set[asyncio.Future] = set()
 
     # Duck-typed client interface used by callers.
 
@@ -432,16 +468,33 @@ class BatchingLLMClient:
         # model-selected final answer without any tool execution.
         if request.tools_required:
             raise LLMValidationError(
-                "GigaChat Batch: native tool-loop (tools_required) not "
-                "supported — legacy functions API without tool_calls/tool role"
+                "Batch: native tool-loop (tools_required) is not supported — "
+                "the batch body is one forced function call, with no tool role"
             )
         return await self._submit(request.model_copy(update={"mode": "function_call"}))
 
     async def aclose(self) -> None:
+        # CancelledError subclasses BaseException, so a cancelled ``_process`` never
+        # enters ``except Exception`` and waiting ``generate_*`` futures hang forever.
+        # Fail every still-pending future before awaiting the cancelled tasks.
+        close_error = LLMError("batch client closed")
+        tasks: list[asyncio.Task] = []
         if self._worker is not None and not self._worker.done():
             self._worker.cancel()
+            tasks.append(self._worker)
         for task in list(self._inflight):
-            task.cancel()
+            if not task.done():
+                task.cancel()
+                tasks.append(task)
+        for fut in list(self._pending):
+            if not fut.done():
+                fut.set_exception(close_error)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._worker = None
+        closer = getattr(self._batch, "aclose", None)
+        if closer is not None:
+            await closer()
 
     # Internal request coalescing.
 
@@ -456,6 +509,8 @@ class BatchingLLMClient:
     async def _submit(self, request: LLMRequest) -> LLMResponse:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
+        self._pending.add(fut)
+        fut.add_done_callback(self._pending.discard)
         self._ensure_running()
         assert self._queue is not None
         await self._queue.put((request, fut))
@@ -490,6 +545,11 @@ class BatchingLLMClient:
             results = await self._batch.run_chat_batch(
                 requests, model=self._model, return_exceptions=True
             )
+        except asyncio.CancelledError:
+            for _, fut in batch:
+                if not fut.done():
+                    fut.set_exception(LLMError("batch client closed"))
+            raise
         except Exception as exc:  # noqa: BLE001 -- propagate the failure to every waiting
                                   # caller
             for _, fut in batch:
@@ -515,7 +575,7 @@ def batch_mode_enabled() -> bool:
     """Return whether LLM_BATCH_MODE enables batch generation. Disabled by default; enable it
     for offline workloads that prioritize batching over interactive latency.
     """
-    return get_env("LLM_BATCH_MODE", "").strip().lower() in ("1", "true", "yes")
+    return _env_flag("LLM_BATCH_MODE")
 
 
 def get_batching_client(

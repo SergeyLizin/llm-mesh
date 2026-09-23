@@ -144,6 +144,13 @@ def test_patches_inherit_future_fields_and_providers(tmp_path, monkeypatch):
     assert json.loads(source.read_text()) == base
 
 
+def test_expand_catalog_rejects_a_nameless_provider():
+    with pytest.raises(catalog.ModelCatalogError, match="no name"):
+        catalog.expand_catalog([{"id": "m", "providers": [{}]}])
+    with pytest.raises(catalog.ModelCatalogError, match="no id"):
+        catalog.expand_catalog([{"providers": [{"name": "p"}]}])
+
+
 @pytest.mark.parametrize('patches', [None, {}, [{}], [{'id': 'missing'}],
     [{'id': 'a'}, {'id': 'a'}], [{'id': 'a', 'providers': {}}],
     [{'id': 'a', 'providers': [{}]}],

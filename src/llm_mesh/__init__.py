@@ -20,7 +20,9 @@ from llm_mesh.types import (
 
 __all__ = [
     "AsyncClosable",
+    "BaseLLMClient",
     "BatchLLMClient",
+    "Capability",
     "EventStreamGenerator",
     "LLMAuthError",
     "LLMClient",
@@ -34,15 +36,42 @@ __all__ = [
     "TextGenerator",
 ]
 
+from llm_mesh.base import BaseLLMClient, Capability
+
 from .openai import OpenAIClient
+from .anthropic import AnthropicClient, AnthropicError
+from .gemini import GeminiClient, GeminiError
 from .gigachat import GigaChatAsyncClient
 from .types import LLMUsage, LLMStreamChunk
 
 from importlib.metadata import version
 
 __version__ = version("llm-mesh")
-__all__ += ["OpenAIClient", "GigaChatAsyncClient", "LLMUsage", "LLMStreamChunk"]
+__all__ += [
+    "AnthropicClient",
+    "AnthropicError",
+    "GeminiClient",
+    "GeminiError",
+    "OpenAIClient",
+    "GigaChatAsyncClient",
+    "LLMUsage",
+    "LLMStreamChunk",
+]
 
 from .openai.discovery import list_models
+from llm_mesh.probe import (
+    ConnectionCheck,
+    ProbeKind,
+    check_client,
+    check_route,
+    check_routes,
+)
 
-__all__ += ["list_models"]
+__all__ += [
+    "ConnectionCheck",
+    "ProbeKind",
+    "check_client",
+    "check_route",
+    "check_routes",
+    "list_models",
+]

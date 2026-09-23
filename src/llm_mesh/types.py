@@ -61,6 +61,10 @@ class LLMRequest(BaseModel):
     # preserve their tool-call history. None keeps the stateless behavior; unsupported roles are
     # ignored.
     history: list[dict[str, Any]] | None = None
+    # Per-call model override. None, and an empty string, keep the client's
+    # configured model, including any environment default that client already
+    # applied. Resolution is ``request.model or client model``.
+    model: str | None = None
     temperature: float = 0.0
     max_tokens: int = 4096
     # Retry length-truncated output with a larger token budget by default. Disable for small
@@ -222,7 +226,8 @@ class LLMResponse(BaseModel):
 class LLMStreamChunk(BaseModel):
     """One generate_stream increment. delta_text carries user-visible content and delta_reasoning
     carries thinking output. Terminal chunks carry finish_reason and may include usage;
-    request_id identifies the provider request when available.
+    request_id identifies the provider request when available. A completed Anthropic
+    message may also carry content_blocks for the next turn.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -232,3 +237,7 @@ class LLMStreamChunk(BaseModel):
     finish_reason: str | None = None
     usage: LLMUsage | None = None
     request_id: str | None = None
+    # Assistant content blocks to replay on the next turn. Anthropic thinking
+    # requires the signature and any redacted block to be sent back. None when
+    # the chunk is not a completed message.
+    content_blocks: list[dict[str, Any]] | None = None

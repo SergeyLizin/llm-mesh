@@ -5,7 +5,7 @@ reasoning, tool, completion, and error classes for consuming provider SSE respon
 from __future__ import annotations
 
 from enum import Enum
-from typing import AsyncIterator
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -91,6 +91,10 @@ class Complete(StreamEvent):
     type: StreamEventType = StreamEventType.COMPLETE
     finish_reason: str | None = None
     usage: LLMUsage | None = None
+    # Replayable assistant blocks for a follow-up turn. Anthropic fills this
+    # when the stream carried thinking signatures, redacted thinking, or tool
+    # use. Other providers leave it empty.
+    content_blocks: list[dict[str, Any]] | None = None
 
 
 class Error(StreamEvent):
@@ -114,5 +118,4 @@ __all__ = [
     "ToolUseStop",
     "Complete",
     "Error",
-    "AsyncIterator",
 ]

@@ -17,7 +17,7 @@ from llm_mesh.gigachat.batch import (
     GigaChatBatchClient,
     GigaChatBatchError,
 )
-from llm_mesh.types import LLMRequest, LLMResponse, LLMValidationError
+from llm_mesh.types import LLMError, LLMRequest, LLMResponse, LLMValidationError
 
 
 def _req(user: str, mode: str = "function_call") -> LLMRequest:
@@ -69,6 +69,30 @@ def _text_result(sub_id: str, content: str) -> dict:
 
 def _bc(**kwargs) -> GigaChatBatchClient:
     return GigaChatBatchClient(token="tok", poll_interval_s=0.0, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_owned_http_client_is_reused_and_closed():
+    bc = _bc()
+    first = bc._http()
+    assert bc._http() is first
+    await bc.aclose()
+    assert bc._owned_client is None
+    again = bc._http()
+    assert again is not first
+    await bc.aclose()
+
+
+@pytest.mark.asyncio
+async def test_external_http_client_is_not_closed():
+    external = httpx.AsyncClient()
+    bc = _bc(http_client=external)
+    try:
+        assert bc._http() is external
+        await bc.aclose()
+        assert external.is_closed is False
+    finally:
+        await external.aclose()
 
 
 # ====================== GigaChatBatchClient: real protocol ==================
@@ -314,6 +338,34 @@ def test_create_batch_refreshes_on_401_token_expired():
     assert auth.refreshes == 1
     assert route.call_count == 2
     assert route.calls[-1].request.headers["Authorization"] == "Bearer fresh"
+
+
+@pytest.mark.asyncio
+async def test_aclose_fails_a_pending_generate_text_instead_of_hanging():
+    """A cancelled batch task used to leave the caller's future pending forever.
+
+    CancelledError is a BaseException, so ``except Exception`` in ``_process``
+    never resolved it. ``aclose`` has to fail that future itself.
+    """
+    started = asyncio.Event()
+
+    class _Hang:
+        async def run_chat_batch(self, requests, **kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+    cli = BatchingLLMClient(_Hang(), model="m", max_delay_s=0.01)
+    pending = asyncio.create_task(
+        cli.generate_text(LLMRequest(system="s", user="u", mode="text"))
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(cli.aclose(), timeout=1)
+        with pytest.raises(LLMError, match="batch client closed"):
+            await asyncio.wait_for(pending, timeout=1)
+    finally:
+        pending.cancel()
+        await cli.aclose()
 
 
 @pytest.mark.asyncio

@@ -3009,5 +3009,57 @@
         "eval_concurrency": 1
       }
     ]
+  },
+  {
+    "id": "claude-opus-5",
+    "title": "Claude Opus 5",
+    "kind": "anthropic",
+    "providers": [
+      {
+        "name": "anthropic",
+        "model": "claude-opus-5",
+        "api_key_env": "ANTHROPIC_API_KEY"
+      }
+    ],
+    "notes": "Anthropic Messages API. The endpoint defaults to https://api.anthropic.com; set base_url or base_url_env on the route to use a proxy. OpenAI-compatible gateways keep their own catalog ids."
+  },
+  {
+    "id": "claude-sonnet-4-6",
+    "title": "Claude Sonnet 4.6",
+    "kind": "anthropic",
+    "providers": [
+      {
+        "name": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "api_key_env": "ANTHROPIC_API_KEY"
+      }
+    ],
+    "notes": "Anthropic Messages API. The endpoint defaults to https://api.anthropic.com; set base_url or base_url_env on the route to use a proxy."
+  },
+  {
+    "id": "claude-haiku-4-5",
+    "title": "Claude Haiku 4.5",
+    "kind": "anthropic",
+    "providers": [
+      {
+        "name": "anthropic",
+        "model": "claude-haiku-4-5-20251001",
+        "api_key_env": "ANTHROPIC_API_KEY"
+      }
+    ],
+    "notes": "Anthropic Messages API. The endpoint defaults to https://api.anthropic.com; set base_url or base_url_env on the route to use a proxy."
+  },
+  {
+    "id": "gemini-25-flash",
+    "title": "Gemini 2.5 Flash",
+    "kind": "gemini",
+    "providers": [
+      {
+        "name": "google",
+        "model": "gemini-2.5-flash",
+        "api_key_env": "GEMINI_API_KEY"
+      }
+    ],
+    "notes": "Native generateContent API. The endpoint defaults to https://generativelanguage.googleapis.com/v1beta. OpenAI-compatible Gemini proxies keep their own catalog ids and kind openai."
   }
 ]

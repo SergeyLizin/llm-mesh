@@ -12,8 +12,9 @@ import json
 import logging
 import os
 import shlex
+import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from llm_mesh.config import CONNECTION_ENV, route_options
 
@@ -31,8 +32,6 @@ ROUTE_ONLY_FIELDS = frozenset({
     # another provider inherit an unsupported concurrency level and trigger rate limits.
     "eval_concurrency",
 })
-
-VALID_KINDS = ("gigachat", "openai")
 
 # Always assign every managed environment variable, using an empty string for unset values, so
 # configuration from the previous route cannot leak into the next.
@@ -73,10 +72,19 @@ def expand_catalog(data: list[dict]) -> list[dict]:
             continue
         base = {k: v for k, v in model.items() if k != "providers"}
         for prov in provs:
+            name = prov.get("name") if isinstance(prov, dict) else None
+            if not isinstance(name, str) or not name:
+                raise ModelCatalogError(
+                    f"catalog model {base.get('id')!r}: a provider entry has no name"
+                )
             route = dict(base)
             route.update({k: v for k, v in prov.items() if k != "name"})
-            route["provider"] = prov["name"]
-            route.setdefault("label", route_label(route["id"], prov["name"]))
+            if not route.get("id"):
+                raise ModelCatalogError(
+                    f"catalog provider {name!r}: model entry has no id"
+                )
+            route["provider"] = name
+            route.setdefault("label", route_label(route["id"], name))
             out.append(route)
     return out
 
@@ -216,6 +224,17 @@ def missing_credentials(route: dict) -> list[str]:
         if not (route.get("api_key") or _env(route.get("api_key_env"))):
             missing.append(route.get("api_key_env") or "LLM_API_KEY")
         return missing
+    if route.get("kind") in ("anthropic", "gemini"):
+        # Both APIs have a fixed default endpoint, so a base URL is optional.
+        # Gemini's default key name is GEMINI_API_KEY; Anthropic's is ANTHROPIC_API_KEY.
+        key_name = route.get("api_key_env") or (
+            "GEMINI_API_KEY" if route.get("kind") == "gemini" else "ANTHROPIC_API_KEY"
+        )
+        if not (route.get("api_key") or _env(key_name)):
+            missing.append(key_name)
+        if not route_model(route) and route.get("model_env"):
+            missing.append(route["model_env"])
+        return missing
     if not (route.get("base_url") or _env(route.get("base_url_env"))):
         missing.append(route.get("base_url_env") or "LLM_BASE_URL")
     if not (route.get("api_key") or _env(route.get("api_key_env"))):
@@ -314,36 +333,82 @@ def apply_route_env(route: dict) -> dict[str, str]:
     return env
 
 
-def make_client(route: dict) -> Any:
-    """Construct the route's LLM client and apply its environment configuration."""
+def _build_gigachat_client(route: dict, env: dict) -> Any:
+    """Build the GigaChat client. Batch mode swaps in the coalescing adapter."""
     from llm_mesh.gigachat import GigaChatAsyncClient
-    from llm_mesh.openai import OpenAIClient
 
-    env = apply_route_env(route)
     model = env["LLM_MODEL"]
-    if route.get("kind") == "gigachat":
-        # Supply resolved connection settings explicitly to the selected provider.
-        kwargs: dict[str, Any] = {"model": model}
-        if env.get("LLM_API_KEY"):
-            kwargs["credentials"] = env["LLM_API_KEY"]
-        if env.get("LLM_AUTH_SCOPE"):
-            kwargs["scope"] = env["LLM_AUTH_SCOPE"]
-        if env.get("LLM_BASE_URL"):
-            kwargs["api_url"] = env["LLM_BASE_URL"]
-        if env.get("LLM_AUTH_URL"):
-            kwargs["auth_url"] = env["LLM_AUTH_URL"]
-        if route.get("http_timeout"):
-            kwargs["timeout_s"] = float(route["http_timeout"])
-        from llm_mesh.gigachat.batch import batch_mode_enabled, get_batching_client
+    # Supply resolved connection settings explicitly to the selected provider.
+    kwargs: dict[str, Any] = {"model": model}
+    if env.get("LLM_PROVIDER_LABEL"):
+        kwargs["label"] = env["LLM_PROVIDER_LABEL"]
+    if env.get("LLM_API_KEY"):
+        kwargs["credentials"] = env["LLM_API_KEY"]
+    if env.get("LLM_AUTH_SCOPE"):
+        kwargs["scope"] = env["LLM_AUTH_SCOPE"]
+    if env.get("LLM_BASE_URL"):
+        kwargs["api_url"] = env["LLM_BASE_URL"]
+    if env.get("LLM_AUTH_URL"):
+        kwargs["auth_url"] = env["LLM_AUTH_URL"]
+    if route.get("http_timeout"):
+        kwargs["timeout_s"] = float(route["http_timeout"])
+    from llm_mesh.gigachat.batch import batch_mode_enabled, get_batching_client
 
-        if batch_mode_enabled():
-            return get_batching_client(
-                model,
-                credentials=kwargs.get("credentials"),
-                scope=kwargs.get("scope"),
-            )
-        return GigaChatAsyncClient(**kwargs)
+    if batch_mode_enabled():
+        return get_batching_client(
+            model,
+            credentials=kwargs.get("credentials"),
+            scope=kwargs.get("scope"),
+        )
+    return GigaChatAsyncClient(**kwargs)
 
+
+def _build_gemini_client(route: dict, env: dict) -> Any:
+    """Build the Gemini client. The import stays inside the builder."""
+    from llm_mesh.gemini import GeminiClient
+
+    kwargs: dict[str, Any] = {
+        "model": env["LLM_MODEL"],
+        "label": env.get("LLM_PROVIDER_LABEL") or None,
+    }
+    if env.get("LLM_API_KEY"):
+        kwargs["api_key"] = env["LLM_API_KEY"]
+    if env.get("LLM_BASE_URL"):
+        kwargs["base_url"] = env["LLM_BASE_URL"]
+    if route.get("http_timeout"):
+        kwargs["http_timeout"] = float(route["http_timeout"])
+    return GeminiClient(**kwargs)
+
+
+def _build_anthropic_client(route: dict, env: dict) -> Any:
+    """Build the Anthropic client. The import stays inside the builder."""
+    from llm_mesh.anthropic import AnthropicClient
+
+    model = env["LLM_MODEL"]
+    anthropic_kwargs: dict[str, Any] = {
+        "model": model,
+        "label": env.get("LLM_PROVIDER_LABEL") or None,
+    }
+    if env.get("LLM_API_KEY"):
+        anthropic_kwargs["api_key"] = env["LLM_API_KEY"]
+    if env.get("LLM_BASE_URL"):
+        anthropic_kwargs["base_url"] = env["LLM_BASE_URL"]
+    if route.get("http_timeout"):
+        anthropic_kwargs["http_timeout"] = float(route["http_timeout"])
+    return AnthropicClient(**anthropic_kwargs)
+
+
+def _build_openai_client(route: dict, env: dict) -> Any:
+    """Build the OpenAI-compatible client. Batch mode wraps it in the coalescer.
+
+    The GigaChat singleton registry is not reused: that registry builds a GigaChat
+    batch client. OpenAI gets its own batch client around the route's OpenAIClient.
+    """
+    from llm_mesh.gigachat.batch import BatchingLLMClient, batch_mode_enabled
+    from llm_mesh.openai import OpenAIClient
+    from llm_mesh.openai.batch import OpenAIBatchClient
+
+    model = env["LLM_MODEL"]
     client = OpenAIClient(
         model=model,
         base_url=env["LLM_BASE_URL"],
@@ -351,7 +416,34 @@ def make_client(route: dict) -> Any:
         label=env.get("LLM_PROVIDER_LABEL") or None,
         http_timeout=float(route["http_timeout"]) if route.get("http_timeout") else None,
     )
+    if batch_mode_enabled():
+        return BatchingLLMClient(OpenAIBatchClient(client=client), model=model)
     return client
+
+
+# kind -> builder(route, env). Imports stay inside the builders so loading the
+# catalog does not import every provider, and so this module is not imported
+# while a provider package is still initializing.
+_ROUTE_CLIENT_BUILDERS: dict[str, Callable[[dict, dict], Any]] = {
+    "anthropic": _build_anthropic_client,
+    "gemini": _build_gemini_client,
+    "gigachat": _build_gigachat_client,
+    "openai": _build_openai_client,
+}
+
+VALID_KINDS = tuple(sorted(_ROUTE_CLIENT_BUILDERS))
+
+
+def make_client(route: dict) -> Any:
+    """Construct the route's LLM client and apply its environment configuration."""
+    env = apply_route_env(route)
+    kind = route.get("kind")
+    builder = _ROUTE_CLIENT_BUILDERS.get(kind) if isinstance(kind, str) else None
+    if builder is None:
+        raise ModelCatalogError(
+            f"{route.get('id')!r}: kind={kind!r}, expected one of {VALID_KINDS}"
+        )
+    return builder(route, env)
 
 
 def selected_model_id() -> str:
@@ -374,6 +466,35 @@ def make_selected_client() -> Any | None:
     return make_client(route)
 
 
+def _format_check_line(result: Any) -> str:
+    """One stdout line for ``--check``. Failure text is capped at 120 characters."""
+    if result.ok:
+        latency = 0 if result.latency_ms is None else result.latency_ms
+        return f"{result.label}  [ok]  {latency}ms"
+    error = (result.error or "")[:120]
+    return f"{result.label}  [FAIL] {result.error_type}: {error}"
+
+
+def _cli_check(selector: str, routes: list[dict]) -> int:
+    """Probe every matching route. Exit 0 when at least one route is ok.
+
+    A bare model id checks every provider. ``id@provider`` checks that one
+    route, so exit 0 means that route succeeded. The header is printed
+    because, unlike ``--list``, this command sends real requests.
+    """
+    from llm_mesh.probe import check_routes
+
+    print("--check makes real API calls (unlike --list).")
+    try:
+        results = check_routes(selector, routes)
+    except ModelCatalogError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    for result in results:
+        print(_format_check_line(result))
+    return 0 if any(result.ok for result in results) else 1
+
+
 # ───────────────────────────────── CLI ────────────────────────────────────
 
 
@@ -388,6 +509,13 @@ def _cli(argv: list[str] | None = None) -> int:
                     help="print shell export statements")
     ap.add_argument("--json", metavar="ID", default="",
                     help="print the route as JSON")
+    ap.add_argument(
+        "--check", metavar="ID", default="",
+        help=(
+            "probe id or id@provider with a real API call "
+            "(unlike --list). Exit 0 when a checked route succeeds"
+        ),
+    )
     args = ap.parse_args(argv)
 
     routes = load_catalog(args.config or None)
@@ -399,6 +527,9 @@ def _cli(argv: list[str] | None = None) -> int:
         for key, value in sorted(route_env(route).items()):
             print(f"export {key}={shlex.quote(value)}")
         return 0
+
+    if args.check:
+        return _cli_check(args.check, routes)
 
     if not args.list:
         ap.print_help()

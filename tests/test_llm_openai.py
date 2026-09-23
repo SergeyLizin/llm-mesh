@@ -16,6 +16,7 @@ from llm_mesh.openai.client import (
     _is_unknown_body_field_error,
     chat_completions_url,
 )
+from llm_mesh.stream_events import Complete
 from llm_mesh.types import (
     LLMAuthError,
     LLMRequest,
@@ -191,6 +192,79 @@ async def test_generate_stream_yields_deltas(monkeypatch):
         await client.aclose()
     assert "".join(c.delta_text for c in chunks) == "Hello"
     assert chunks[-1].finish_reason == "stop"
+    sent = json.loads(respx.calls.last.request.content)
+    assert sent["stream_options"] == {"include_usage": True}
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_stream_events_request_usage_and_keep_it(monkeypatch):
+    monkeypatch.setenv("LLM_BASE_URL", BASE)
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    sse = _sse(
+        {"choices": [{"delta": {"content": "ok"}}]},
+        {"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    )
+    respx.post(URL).mock(
+        return_value=httpx.Response(
+            200, text=sse, headers={"content-type": "text/event-stream"}
+        )
+    )
+    client = OpenAIClient(model="m")
+    try:
+        events = [event async for event in client.generate_stream_events(_request())]
+    finally:
+        await client.aclose()
+    sent = json.loads(respx.calls.last.request.content)
+    assert sent["stream_options"] == {"include_usage": True}
+    assert isinstance(events[-1], Complete)
+    assert events[-1].usage is not None
+    assert events[-1].usage.prompt_tokens == 3
+    assert events[-1].usage.completion_tokens == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_stream_drops_include_usage_after_unknown_field_400(monkeypatch):
+    monkeypatch.setenv("LLM_BASE_URL", BASE)
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    ok = _sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
+    route = respx.post(URL).mock(side_effect=[
+        httpx.Response(400, text="Unrecognized request argument supplied: stream_options"),
+        httpx.Response(200, text=ok, headers={"content-type": "text/event-stream"}),
+        httpx.Response(200, text=ok, headers={"content-type": "text/event-stream"}),
+    ])
+    client = OpenAIClient(model="m")
+    try:
+        chunks = [c async for c in client.generate_stream(_request())]
+        assert "".join(c.delta_text for c in chunks) == "ok"
+        assert client._no_stream_usage is True
+        bodies = [json.loads(call.request.content) for call in route.calls]
+        assert bodies[0]["stream_options"] == {"include_usage": True}
+        assert "stream_options" not in bodies[1]
+        async for _chunk in client.generate_stream(_request()):
+            pass
+        assert "stream_options" not in json.loads(route.calls.last.request.content)
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_stream_400_unrelated_to_usage_is_not_retried(monkeypatch):
+    monkeypatch.setenv("LLM_BASE_URL", BASE)
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    route = respx.post(URL).mock(return_value=httpx.Response(400, text="model not found"))
+    client = OpenAIClient(model="m")
+    try:
+        with pytest.raises(OpenAIError, match="model not found"):
+            async for _chunk in client.generate_stream(_request()):
+                pass
+    finally:
+        await client.aclose()
+    assert route.call_count == 1
+    assert client._no_stream_usage is False
 
 
 @respx.mock

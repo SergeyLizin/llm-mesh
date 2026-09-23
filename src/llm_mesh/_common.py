@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
+from llm_mesh.config import get_env
 from llm_mesh.text_parsing import looks_degenerate_repetition
 from llm_mesh.types import LLMRequest
 from .hooks import (
@@ -29,6 +31,29 @@ def check_response_canary(response_text: str, *, context: str) -> None:
     if not token or not response_text:
         return
     check_and_warn(response_text, token, session_id="", context=context)
+
+
+def _args_satisfy_schema(arguments: Any, schema: dict[str, Any] | None) -> bool:
+    """Check parsed arguments against a JSON Schema.
+
+    An explicit validation failure is False, so the caller can reject the
+    response. A missing schema, non-object arguments, a missing jsonschema
+    package, or an unsupported schema do not block the response: only a
+    confirmed ``jsonschema.ValidationError`` returns False.
+    """
+    if not schema or not isinstance(arguments, dict):
+        return True
+    try:
+        import jsonschema  # noqa: PLC0415 -- import the validator lazily
+    except Exception:
+        return True
+    try:
+        jsonschema.validate(instance=arguments, schema=schema)
+        return True
+    except jsonschema.ValidationError:
+        return False
+    except Exception:
+        return True
 
 
 def build_text_messages(
@@ -181,6 +206,124 @@ async def post_with_length_retry(
     return result
 
 
+# Positive flags accept only these tokens. Call sites that historically did not
+# strip keep that behavior through the strip parameter: a padded " 1 " must not
+# start meaning true on a site that never stripped.
+_ENV_TRUE = frozenset({"1", "true", "yes"})
+# LLM_VERIFY_SSL is an exclusion list, not a positive flag. The two polarities
+# and the provider-specific defaults are part of the client contract.
+_ENV_FALSE = frozenset({"0", "false", "no"})
+
+
+def _env_flag(name: str, *, default: str = "", strip: bool = True) -> bool:
+    """Return whether the setting is 1, true, or yes.
+
+    Most sites strip. OpenAI's LLM_STREAM_TRANSPORT, LLM_DISABLE_TOOLS, and
+    LLM_NO_DEGRADE do not; pass strip=False so a padded value keeps its old
+    meaning. Values always come from get_env, which honors LLM_OPTIONS.
+    """
+    raw = get_env(name, default)
+    if strip:
+        raw = raw.strip()
+    return raw.lower() in _ENV_TRUE
+
+
+def _env_is_disabled(name: str, *, default: str, strip: bool = False) -> bool:
+    """Return whether the setting is 0, false, or no.
+
+    LLM_VERIFY_SSL uses this list. OpenAI and Anthropic default to verified
+    ("1"); GigaChat defaults to unverified ("false") because those
+    installations often lack the CA roots. Do not rewrite those sites as
+    _env_flag: the polarity and the defaults differ by provider.
+    """
+    raw = get_env(name, default)
+    if strip:
+        raw = raw.strip()
+    return raw.lower() in _ENV_FALSE
+
+
+def _env_positive_int(name: str) -> int | None:
+    """Read a positive integer, or None when missing, zero, or not digits."""
+    raw = get_env(name, "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return None
+
+
+def _env_float_default(
+    name: str, default: float, *, logger: logging.Logger,
+) -> float:
+    """Read a float. Empty or non-numeric values keep ``default`` and warn.
+
+    A bad ``LLM_HTTP_TIMEOUT`` used to raise from the constructor. Neighboring
+    numeric options already ignore garbage; this matches them.
+    """
+    raw = get_env(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("%s is not a number (%r) — ignoring", name, raw)
+        return default
+
+
+def _env_int_default(
+    name: str, default: int, *, logger: logging.Logger,
+) -> int:
+    """Read an int. Empty or non-numeric values keep ``default`` and warn."""
+    raw = get_env(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("%s is not an integer (%r) — ignoring", name, raw)
+        return default
+
+
+def _env_nonneg_int(name: str, default: int) -> int:
+    """Read a nonnegative integer. Zero is valid; anything else uses default.
+
+    GigaChat's length-retry budget defaults to 1. OpenAI and Anthropic
+    default to 2. The default stays at the call site.
+    """
+    raw = get_env(name, "").strip()
+    if raw.isdigit():
+        return int(raw)
+    return default
+
+
+def _parse_json_dict_env(
+    name: str,
+    *,
+    logger: logging.Logger,
+    include_error: bool = True,
+) -> dict[str, Any] | None:
+    """Parse an environment variable as a JSON object.
+
+    Missing, invalid, and non-object values warn and return None so client
+    construction does not fail. include_error keeps the OpenAI warning, which
+    names the parser exception. Anthropic's warning does not. The logger is
+    the caller's so the warning stays on that module.
+    """
+    raw = get_env(name, "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        if include_error:
+            logger.warning("%s invalid JSON (%s) — ignoring", name, exc)
+        else:
+            logger.warning("%s is not valid JSON — ignoring", name)
+        return None
+    if not isinstance(parsed, dict):
+        logger.warning("%s is not a JSON object — ignoring", name)
+        return None
+    return parsed
+
+
 __all__ = [
     "apply_canary",
     "build_text_messages",
@@ -190,4 +333,11 @@ __all__ = [
     "post_with_length_retry",
     "response_content",
     "warn_if_truncated",
+    "_env_flag",
+    "_env_float_default",
+    "_env_int_default",
+    "_env_is_disabled",
+    "_env_nonneg_int",
+    "_env_positive_int",
+    "_parse_json_dict_env",
 ]

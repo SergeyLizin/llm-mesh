@@ -20,19 +20,27 @@ from typing import Literal, Any, AsyncIterator, cast
 import httpx
 
 from llm_mesh._common import (
+    _env_flag,
+    _env_float_default,
+    _env_is_disabled,
+    _env_positive_int,
+    _parse_json_dict_env,
     apply_canary as _apply_canary,
-    finish_reason_opt,
     build_text_messages as _build_text_messages,
     check_response_canary,
+    finish_reason_opt,
     post_with_length_retry,
     warn_if_truncated,
 )
+from llm_mesh.base import BaseLLMClient, Capability
 from llm_mesh.gigachat._common import (
     _env_nonneg_int,
     _parse_env_float,
     _parse_expires_at,
     _resolve_scope,
+    ReasoningContentParser,
     simplify_schema_for_gigachat,
+    split_reasoning_content,
 )
 from llm_mesh._retry import (
     RETRYABLE_SERVER_STATUS,
@@ -40,9 +48,14 @@ from llm_mesh._retry import (
     retry_after_delay,
 )
 from llm_mesh._streaming import chunk_from_sse_payload, iter_sse_payloads
-from llm_mesh.stream_events import Complete, ContentDelta, Error, StreamEvent
+from llm_mesh.stream_events import (
+    Complete,
+    ContentDelta,
+    Error,
+    ReasoningDelta,
+    StreamEvent,
+)
 from llm_mesh._streaming import events_from_sse_payload, ToolCallAccumulator
-from llm_mesh._common import apply_canary
 
 from llm_mesh.types import (
     LLMAuthError,
@@ -57,7 +70,7 @@ from llm_mesh.types import (
 logger = logging.getLogger(__name__)
 
 
-def _check_response_canary(response_text: str, context: str) -> None:
+def _check_response_canary(response_text: str, context: str = "") -> None:
     """Scan generated text and serialized function arguments for the active canary. With no token
     this is a no-op; detection logs CRITICAL through the application hook without raising.
     Scanning covers individual generations, not only final user-facing output.
@@ -129,10 +142,39 @@ def _resolve_credentials(explicit: str | None) -> str | None:
 
 
 
-class GigaChatAsyncClient:
-    """Async GigaChat client supporting structured output through legacy function calling. Model
-    selection belongs to the client instance; use separate instances for different models.
+class GigaChatAsyncClient(BaseLLMClient):
+    """Async GigaChat client supporting structured output through legacy function calling.
+
+    The instance model is the default. ``LLMRequest.model`` overrides it for
+    one call. A separate instance is for a different capability set (output
+    ceiling, tool choice), not for another model name.
+
+    ``no_degrade`` and ``fallback_policy="preserve"`` refuse salvage of
+    fenced JSON and prose function envelopes. ``LLM_EXTRA_BODY`` and
+    ``LLM_EXTRA_HEADERS`` merge onto chat requests; fields the client
+    already set win.
     """
+
+    # TOOLS_REQUIRED is absent. generate_structured raises LLMValidationError
+    # when request.tools_required is set: the legacy functions API has no
+    # tool_calls array and no tool role, so a native tool loop cannot run.
+    # BATCH is absent here too. make_client returns BatchingLLMClient when
+    # LLM_BATCH_MODE is set; that adapter is not a BaseLLMClient.
+    CAPABILITIES = frozenset({
+        Capability.TEXT,
+        Capability.STREAM,
+        Capability.STREAM_EVENTS,
+        Capability.STRUCTURED,
+        # Legacy functions/function_call, not the modern tools/tool_calls API.
+        Capability.TOOLS,
+        # function_call="auto" selects one of request.tools. There is no
+        # parallel tool_calls loop.
+        Capability.MULTI_TOOL,
+        # mode="json_schema" sends native response_format json_schema.
+        Capability.JSON_SCHEMA_MODE,
+        Capability.LENGTH_RETRY,
+        Capability.COUNT_TOKENS,
+    })
 
     def __init__(
         self,
@@ -141,6 +183,7 @@ class GigaChatAsyncClient:
         token: str | None = None,
         scope: str | None = None,
         model: str = "GigaChat",
+        label: str | None = None,
         api_url: str | None = None,
         auth_url: str | None = None,
         verify: bool | None = None,
@@ -151,9 +194,13 @@ class GigaChatAsyncClient:
         max_concurrent: int | None = None,
         tool_choice: Literal["single", "auto"] = "single",
         use_model_token_limits: bool = True,
+        no_degrade: bool | None = None,
+        fallback_policy: Literal["recover", "preserve"] = "recover",
     ) -> None:
         if tool_choice not in ("single", "auto"):
             raise ValueError("tool_choice must be 'single' or 'auto'")
+        if fallback_policy not in ("recover", "preserve"):
+            raise ValueError("fallback_policy must be 'recover' or 'preserve'")
         self._tool_choice = tool_choice
         self._credentials = _resolve_credentials(credentials)
         self._token = token
@@ -163,10 +210,19 @@ class GigaChatAsyncClient:
         self._token_expiry_skew_s = 60.0
         self._scope = _resolve_scope(scope)
         self.model = model
+        # Same role as OpenAI/Anthropic PROVIDER: the probe label. The canary
+        # override does not read it; those call sites already qualify context.
+        self.PROVIDER = label or get_env("LLM_PROVIDER_LABEL") or "gigachat"
         self._api_url = (api_url or get_env("LLM_BASE_URL", GIGACHAT_BASE_URL)).rstrip("/")
         self._auth_url = auth_url or get_env("LLM_AUTH_URL", GIGACHAT_AUTH_URL)
-        self._verify = verify if verify is not None else get_env("LLM_VERIFY_SSL", "false").lower() not in ("0", "false", "no")
-        self._timeout = httpx.Timeout(timeout_s if timeout_s is not None else float(get_env("LLM_HTTP_TIMEOUT", "600")), connect=30.0)
+        self._verify = verify if verify is not None else not _env_is_disabled(
+            "LLM_VERIFY_SSL", default="false",
+        )
+        self._timeout = httpx.Timeout(
+            timeout_s if timeout_s is not None
+            else _env_float_default("LLM_HTTP_TIMEOUT", 600.0, logger=logger),
+            connect=30.0,
+        )
         self._max_refresh = max_token_refresh_attempts
         # Retry transient network failures and server errors. Rate limits use the separately
         # configured Retry-After/backoff handling.
@@ -182,26 +238,30 @@ class GigaChatAsyncClient:
         # argument, LLM_MAX_CONCURRENT, then no limit. Lazily create the semaphore inside
         # the active event loop.
         if max_concurrent is None:
-            env_val = get_env("LLM_MAX_CONCURRENT", "").strip()
-            if env_val.isdigit() and int(env_val) > 0:
-                max_concurrent = int(env_val)
+            max_concurrent = _env_positive_int("LLM_MAX_CONCURRENT")
         self._max_concurrent = max_concurrent
         self._semaphore: asyncio.Semaphore | None = None
 
         # Use a catalog-configurable reasoning field, defaulting to reasoning_content.
         # Deployments with a different response field can declare it without changing parsing
-        # code.
+        # code. When that field is empty, <think> tags inside content are the fallback.
         self._reasoning_field: str = (
             get_env("LLM_REASONING_FIELD", "").strip() or "reasoning_content"
         )
 
-        # Cache the output-token ceiling per instance; LLM_MAX_OUTPUT_TOKENS overrides it
-        # for experiments.
-        _forced = get_env("LLM_MAX_OUTPUT_TOKENS", "").strip()
-        if _forced.isdigit() and int(_forced) > 0:
-            self._max_output_tokens = int(_forced)
+        # LLM_MAX_OUTPUT_TOKENS is an explicit ceiling for every model on this
+        # client. Otherwise the ceiling is resolved per request: a per-call
+        # model override must not inherit the instance model's limit.
+        # _max_output_tokens remains the instance-model ceiling for readers
+        # that inspect the client before a request.
+        self._use_model_token_limits = use_model_token_limits
+        self._forced_max_output_tokens = _env_positive_int("LLM_MAX_OUTPUT_TOKENS")
+        if self._forced_max_output_tokens is not None:
+            self._max_output_tokens = self._forced_max_output_tokens
         else:
-            self._max_output_tokens = _model_max_tokens(model) if use_model_token_limits else None
+            self._max_output_tokens = (
+                _model_max_tokens(model) if use_model_token_limits else None
+            )
 
         # Environment sampling overrides allow A/B measurements without changing caller
         # defaults, including temperature=1 with top_p=0. With no override, preserve the
@@ -212,9 +272,22 @@ class GigaChatAsyncClient:
         # LLM_DISABLE_REASONING suppresses reasoning_effort and sends
         # chat_template_kwargs.enable_thinking=false for GigaChat reasoning models. The flag is
         # off by default, preserving existing generation behavior.
-        _disable_r = get_env("LLM_DISABLE_REASONING", "").strip().lower()
-        self._disable_reasoning = _disable_r in ("1", "true", "yes")
+        self._disable_reasoning = _env_flag("LLM_DISABLE_REASONING")
         self._reasoning_effort = get_env("LLM_REASONING_EFFORT", "").strip()
+        self._preserve_responses = fallback_policy == "preserve"
+        self._no_degrade = (
+            no_degrade if no_degrade is not None else _env_flag("LLM_NO_DEGRADE")
+        )
+        parsed_headers = _parse_json_dict_env(
+            "LLM_EXTRA_HEADERS", logger=logger, include_error=False,
+        )
+        self._extra_headers = (
+            {str(key): str(value) for key, value in parsed_headers.items()}
+            if parsed_headers else {}
+        )
+        self._extra_body = _parse_json_dict_env(
+            "LLM_EXTRA_BODY", logger=logger, include_error=False,
+        ) or {}
 
         if not self._token and not self._credentials:
             raise LLMAuthError(
@@ -223,19 +296,23 @@ class GigaChatAsyncClient:
             )
 
     async def __aenter__(self) -> GigaChatAsyncClient:
-        self._client = httpx.AsyncClient(timeout=self._timeout, verify=self._verify)
+        # Reuse an already opened transport. Replacing it here used to drop
+        # the previous client without closing it.
+        self._ensure_http()
         return self
 
     async def __aexit__(self, *_: Any) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        await self.aclose()
 
-    def _ensure_http(self) -> httpx.AsyncClient:
-        if self._client is None:
-            # Initialize lazily when the client is used without async with.
-            self._client = httpx.AsyncClient(timeout=self._timeout, verify=self._verify)
-        return self._client
+    def _check_response_canary(self, response_text: str, *, context: str) -> None:
+        """Scan text and serialized function arguments for the active canary.
+
+        Call sites pass a fully qualified context such as gigachat.generate_text.
+        The base helper would prefix PROVIDER and change the warning. Forward
+        to the module function: stream tests replace that name, and a direct
+        call to check_response_canary would hide the replacement.
+        """
+        _check_response_canary(response_text, context)
 
     async def count_tokens(
         self, texts: "list[str]", *, model: str | None = None
@@ -261,11 +338,7 @@ class GigaChatAsyncClient:
             resp = await client.post(
                 url,
                 json=body,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "RqUID": str(uuid.uuid4()),
-                    "Content-Type": "application/json",
-                },
+                headers=self._chat_headers(token, str(uuid.uuid4())),
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -282,11 +355,6 @@ class GigaChatAsyncClient:
             )
         raise LLMError("GigaChat tokens/count: token refresh attempts exhausted")
 
-    async def aclose(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
-
     def _apply_sampling(self, body: dict[str, Any], request_temperature: float) -> None:
         """Apply temperature/top_p environment overrides. Otherwise retain the caller's temperature
         and omit top_p.
@@ -297,6 +365,24 @@ class GigaChatAsyncClient:
         )
         if self._force_top_p is not None:
             body["top_p"] = self._force_top_p
+
+    def _apply_extra_body(self, body: dict[str, Any]) -> None:
+        """Fill holes from ``LLM_EXTRA_BODY``. Keys already on the body win."""
+        for key, value in self._extra_body.items():
+            body.setdefault(key, value)
+
+    def _chat_headers(self, token: str, rquid: str, **more: str) -> dict[str, str]:
+        """Bearer token and ``RqUID`` stay the client's. Extra headers fill the rest."""
+        headers = {**self._extra_headers, **more}
+        headers["Authorization"] = f"Bearer {token}"
+        headers["RqUID"] = rquid
+        headers.setdefault("Content-Type", "application/json")
+        return headers
+
+    @property
+    def _forbids_silent_recovery(self) -> bool:
+        """True when fenced JSON and prose function envelopes must not be accepted."""
+        return self._no_degrade or self._preserve_responses
 
     def _resolve_reasoning_effort(self, request: "LLMRequest") -> str | None:
         """Resolve reasoning effort from the request, then LLM_REASONING_EFFORT. Accept low,
@@ -320,21 +406,41 @@ class GigaChatAsyncClient:
         ctk.setdefault("enable_thinking", False)
         body["chat_template_kwargs"] = ctk
 
-    def _clip_max_tokens(self, requested: int) -> int:
-        """Clip max_tokens to the model ceiling and warn once per model per process when clipping
-        occurs.
+    def _effective_model(self, request: LLMRequest) -> str:
+        """Request model, else the model configured on this client."""
+        return request.model or self.model
+
+    def _output_ceiling(self, model: str) -> int | None:
+        """Explicit env ceiling, else the named model's limit, else none.
+
+        use_model_token_limits=False with no LLM_MAX_OUTPUT_TOKENS means the
+        caller owns the budget. A later length retry must not treat that as
+        a numeric cap.
         """
-        if self._max_output_tokens is None or requested <= self._max_output_tokens:
+        if self._forced_max_output_tokens is not None:
+            return self._forced_max_output_tokens
+        if not self._use_model_token_limits:
+            return None
+        return _model_max_tokens(model)
+
+    def _clip_max_tokens(self, requested: int, model: str | None = None) -> int:
+        """Clip max_tokens to the model ceiling and warn once per model per process when clipping
+        occurs. Omit model to use the instance model, which is what callers
+        did before per-call overrides existed.
+        """
+        name = model or self.model
+        ceiling = self._output_ceiling(name)
+        if ceiling is None or requested <= ceiling:
             return requested
-        if self.model not in _MAX_TOKENS_CLIP_WARNED:
+        if name not in _MAX_TOKENS_CLIP_WARNED:
             logger.warning(
                 "GigaChat(%s): max_tokens=%d exceeds per-model limit %d, "
                 "clipping. Set max_tokens=%d or less for this model.",
-                self.model, requested, self._max_output_tokens,
-                self._max_output_tokens,
+                name, requested, ceiling,
+                ceiling,
             )
-            _MAX_TOKENS_CLIP_WARNED.add(self.model)
-        return self._max_output_tokens
+            _MAX_TOKENS_CLIP_WARNED.add(name)
+        return ceiling
 
     # --- OAuth -----------------------------------------------------------
 
@@ -459,35 +565,32 @@ class GigaChatAsyncClient:
 
     # --- chat/completions -----------------------------------------------
 
-    def _ensure_semaphore(self) -> asyncio.Semaphore | None:
-        """Create the semaphore lazily in the active event loop; the client itself may have been
-        constructed outside a loop.
-        """
-        if self._max_concurrent is None:
-            return None
-        if self._semaphore is None:
-            self._semaphore = asyncio.Semaphore(self._max_concurrent)
-        return self._semaphore
-
     async def _post_chat_with_length_retry(
-        self, body: dict[str, Any]
+        self, body: dict[str, Any], *, model: str,
     ) -> tuple[dict[str, Any], str | None]:
         """Wrap transport retries with adaptive length retries. Double max_tokens up to the model
         ceiling, at most _length_retries times. Normal responses and requests already at the
         ceiling are unchanged. This avoids returning truncated text or incomplete structured
-        JSON.
+        JSON. The ceiling is the effective model's, not the instance model's.
         """
+        ceiling = self._output_ceiling(model)
+
+        def next_max_tokens(current: int) -> int:
+            # No ceiling: double without a cap. min(current * 2, None) raises
+            # TypeError, which used to fail the call when model limits were off.
+            if ceiling is None:
+                return current * 2 if current else 0
+            if not current:
+                return ceiling
+            return min(current * 2, ceiling)
+
         return await post_with_length_retry(
             body,
             post=self._post_chat_with_retry,
             payload_of=lambda result: result[0],
             retries=self._length_retries,
-            next_max_tokens=lambda current: (
-                min(current * 2, self._max_output_tokens)
-                if current
-                else self._max_output_tokens
-            ),
-            provider=f"GigaChat({self.model})",
+            next_max_tokens=next_max_tokens,
+            provider=f"GigaChat({model})",
             logger=logger,
         )
 
@@ -526,11 +629,7 @@ class GigaChatAsyncClient:
                         resp = await client.post(
                             url,
                             json=body,
-                            headers={
-                                "Authorization": f"Bearer {token}",
-                                "RqUID": rquid,
-                                "Content-Type": "application/json",
-                            },
+                            headers=self._chat_headers(token, rquid),
                         )
                     except (
                         httpx.TimeoutException,
@@ -625,19 +724,22 @@ class GigaChatAsyncClient:
         where function calling is unnecessary; parse message.content as text.
         """
         body = {
-            "model": self.model,
+            "model": self._effective_model(request),
             "messages": _build_text_messages(request, tool_turns=False),
-            "max_tokens": self._clip_max_tokens(request.max_tokens),
+            "max_tokens": self._clip_max_tokens(request.max_tokens, self._effective_model(request)),
         }
         self._apply_sampling(body, request.temperature)
         effort = self._resolve_reasoning_effort(request)
         if effort:
             body["reasoning_effort"] = effort
         self._apply_reasoning_disable(body)
+        self._apply_extra_body(body)
         # When length_retry=False, preserve the small best-effort budget instead of escalating a
         # truncated or repetitive response.
         if request.length_retry:
-            payload, request_id = await self._post_chat_with_length_retry(body)
+            payload, request_id = await self._post_chat_with_length_retry(
+                body, model=self._effective_model(request),
+            )
         else:
             payload, request_id = await self._post_chat_with_retry(body)
         if request.mode == "json_schema" or (request.tools and self._tool_choice == "auto"):
@@ -652,11 +754,14 @@ class GigaChatAsyncClient:
         except (KeyError, IndexError) as exc:
             raise LLMValidationError(f"GigaChat: malformed response: {exc}", payload=payload) from exc
         content = message.get("content", "") or ""
+        if not isinstance(content, str):
+            content = ""
+        visible, reasoning = self._visible_and_reasoning(message)
         warn_if_truncated(
             choice,
             request,
             content,
-            sent_max_tokens=self._clip_max_tokens(request.max_tokens),
+            sent_max_tokens=self._clip_max_tokens(request.max_tokens, self._effective_model(request)),
             provider="GigaChat",
             logger=logger,
         )
@@ -666,15 +771,15 @@ class GigaChatAsyncClient:
         usage = LLMUsage.from_raw(usage_raw)
         response = LLMResponse(
             arguments={},
-            text=content,
-            reasoning_content=message.get(self._reasoning_field) or None,
+            text=visible,
+            reasoning_content=reasoning,
             finish_reason=finish_reason_opt(payload),
             request_id=request_id,
-            model=str(payload.get("model", self.model)),
+            model=str(payload.get("model", self._effective_model(request))),
             usage=usage,
             raw=payload,
         )
-        _check_response_canary(content, context="gigachat.generate_text")
+        self._check_response_canary(content, context="gigachat.generate_text")
         return response
 
     async def generate_stream(
@@ -686,9 +791,9 @@ class GigaChatAsyncClient:
         output.
         """
         body: dict[str, Any] = {
-            "model": self.model,
+            "model": self._effective_model(request),
             "messages": _build_text_messages(request, tool_turns=False),
-            "max_tokens": self._clip_max_tokens(request.max_tokens),
+            "max_tokens": self._clip_max_tokens(request.max_tokens, self._effective_model(request)),
             "stream": True,
         }
         self._apply_sampling(body, request.temperature)
@@ -696,6 +801,7 @@ class GigaChatAsyncClient:
         if effort:
             body["reasoning_effort"] = effort
         self._apply_reasoning_disable(body)
+        self._apply_extra_body(body)
 
         sem = self._ensure_semaphore()
         if sem is None:
@@ -714,12 +820,9 @@ class GigaChatAsyncClient:
 
         while True:
             rquid = str(uuid.uuid4())
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "RqUID": rquid,
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream",
-            }
+            headers = self._chat_headers(
+                token, rquid, Accept="text/event-stream",
+            )
             agg: list[str] = []  # Per-attempt state; finally scans any partial output.
             try:
                 async with client.stream(
@@ -741,6 +844,8 @@ class GigaChatAsyncClient:
 
                     request_id = resp.headers.get("x-request-id") or rquid
                     first = True
+                    parser = ReasoningContentParser()
+                    closed = False
                     async for payload in iter_sse_payloads(resp.aiter_lines()):
                         chunk = chunk_from_sse_payload(
                             payload, request_id=request_id, first=first,
@@ -748,8 +853,18 @@ class GigaChatAsyncClient:
                         )
                         if chunk.delta_text:
                             agg.append(chunk.delta_text)
-                        yield chunk
+                        flush = chunk.finish_reason is not None
+                        if flush:
+                            closed = True
+                        yield self._apply_think_chunk(parser, chunk, flush=flush)
                         first = False
+                    if not closed:
+                        tail = parser.flush()
+                        if tail.content or tail.reasoning_content:
+                            yield LLMStreamChunk(
+                                delta_text=tail.content,
+                                delta_reasoning=tail.reasoning_content,
+                            )
                     return
             except (
                 httpx.TimeoutException,
@@ -762,7 +877,7 @@ class GigaChatAsyncClient:
             finally:
                 # Scan on completion, network interruption, and early consumer termination. An
                 # empty aggregate on a 401 retry is a no-op.
-                _check_response_canary(
+                self._check_response_canary(
                     "".join(agg), context="gigachat.generate_stream"
                 )
 
@@ -795,7 +910,9 @@ class GigaChatAsyncClient:
             payload = None
             request_id = None
             try:
-                payload, request_id = await self._post_chat_with_length_retry(body)
+                payload, request_id = await self._post_chat_with_length_retry(
+                    body, model=self._effective_model(request),
+                )
                 response = self._parse_response(payload, request, request_id)
             except LLMValidationError as exc:
                 # Capture every rejected response, including retries that later
@@ -813,12 +930,16 @@ class GigaChatAsyncClient:
                 raise
             # Scan both text and serialized function arguments: structured output can leak the
             # canary too.
-            _check_response_canary(response.text or "", context="gigachat.generate_structured.text")
+            self._check_response_canary(
+                response.text or "", context="gigachat.generate_structured.text",
+            )
             if response.arguments:
                 try:
                     import json as _json
                     args_str = _json.dumps(response.arguments, ensure_ascii=False, default=str)
-                    _check_response_canary(args_str, context="gigachat.generate_structured.args")
+                    self._check_response_canary(
+                        args_str, context="gigachat.generate_structured.args",
+                    )
                 except Exception:
                     pass
             return response
@@ -835,15 +956,16 @@ class GigaChatAsyncClient:
         messages = (self._legacy_messages(request) if self._tool_choice == "auto"
                     else _build_text_messages(request, tool_turns=False))
         body: dict[str, Any] = {
-            "model": self.model,
+            "model": self._effective_model(request),
             "messages": messages,
-            "max_tokens": self._clip_max_tokens(request.max_tokens),
+            "max_tokens": self._clip_max_tokens(request.max_tokens, self._effective_model(request)),
         }
         self._apply_sampling(body, request.temperature)
         effort = self._resolve_reasoning_effort(request)
         if effort:
             body["reasoning_effort"] = effort
         self._apply_reasoning_disable(body)
+        self._apply_extra_body(body)
 
         if request.mode == "json_schema":
             body["response_format"] = {
@@ -898,7 +1020,7 @@ class GigaChatAsyncClient:
             choice,
             request,
             message.get("content", "") or "",
-            sent_max_tokens=self._clip_max_tokens(request.max_tokens),
+            sent_max_tokens=self._clip_max_tokens(request.max_tokens, self._effective_model(request)),
             provider="GigaChat",
             logger=logger,
         )
@@ -937,13 +1059,14 @@ class GigaChatAsyncClient:
         _ = request
         # Expose the model-selected function name so the caller can route a multi-tool response.
         chosen_fn = fc.get("name") if isinstance(fc, dict) else None
+        _, reasoning = self._visible_and_reasoning(message)
         return LLMResponse(
             arguments=arguments,
             function_name=chosen_fn,
-            reasoning_content=message.get(self._reasoning_field) or None,
+            reasoning_content=reasoning,
             finish_reason=finish_reason_opt(payload),
             request_id=request_id,
-            model=str(payload.get("model", self.model)),
+            model=str(payload.get("model", self._effective_model(request))),
             usage=usage,
             raw=payload,
         )
@@ -967,20 +1090,29 @@ class GigaChatAsyncClient:
         # Markdown fences or surrounding prose through salvage parsing.
         if request.mode == "json_schema":
             content = message.get("content") or ""
-            warn_if_truncated(choice, request, content, sent_max_tokens=self._clip_max_tokens(request.max_tokens), provider="GigaChat", logger=logger)
-            arguments = self._parse_json_content(content)
+            if not isinstance(content, str):
+                content = ""
+            visible, reasoning = self._visible_and_reasoning(message)
+            warn_if_truncated(choice, request, content, sent_max_tokens=self._clip_max_tokens(request.max_tokens, self._effective_model(request)), provider="GigaChat", logger=logger)
+            arguments = self._json_schema_arguments(visible)
             if arguments is None:
+                why = (
+                    "non-JSON content; LLM_NO_DEGRADE or "
+                    "fallback_policy=preserve forbids salvage"
+                    if self._forbids_silent_recovery
+                    else "unparseable JSON"
+                )
                 raise LLMValidationError(
-                    f"GigaChat: response_format returned unparseable JSON "
+                    f"GigaChat: response_format returned {why} "
                     f"(content={content[:200]!r})"
                 )
             return LLMResponse(
                 arguments=arguments,
                 function_name=request.function_name,
-                text=content,
-                reasoning_content=message.get(self._reasoning_field) or None,
+                text=visible,
+                reasoning_content=reasoning,
                 request_id=request_id,
-                model=str(payload.get("model", self.model)),
+                model=str(payload.get("model", self._effective_model(request))),
                 usage=usage,
                 finish_reason=finish_reason_opt(payload),
                 raw=payload,
@@ -989,8 +1121,13 @@ class GigaChatAsyncClient:
         # Legacy output may contain function_call, tool_calls, or a textual call envelope in
         # content.
         content = message.get("content", "") or ""
-        warn_if_truncated(choice, request, content, sent_max_tokens=self._clip_max_tokens(request.max_tokens), provider="GigaChat", logger=logger)
-        chosen_fn, arguments = self._extract_function_call(message, request)
+        if not isinstance(content, str):
+            content = ""
+        visible, reasoning = self._visible_and_reasoning(message)
+        warn_if_truncated(choice, request, content, sent_max_tokens=self._clip_max_tokens(request.max_tokens, self._effective_model(request)), provider="GigaChat", logger=logger)
+        stripped = dict(message)
+        stripped["content"] = visible
+        chosen_fn, arguments = self._extract_function_call(stripped, request)
         if chosen_fn is None:
             if request.tools:
                 # In auto mode, return an empty selection when the model answers in text; do not
@@ -998,10 +1135,10 @@ class GigaChatAsyncClient:
                 return LLMResponse(
                     arguments={},
                     function_name=None,
-                    text=content,
-                    reasoning_content=message.get(self._reasoning_field) or None,
+                    text=visible,
+                    reasoning_content=reasoning,
                     request_id=request_id,
-                    model=str(payload.get("model", self.model)),
+                    model=str(payload.get("model", self._effective_model(request))),
                     usage=usage,
                     finish_reason=finish_reason_opt(payload),
                     raw=payload,
@@ -1012,10 +1149,10 @@ class GigaChatAsyncClient:
         return LLMResponse(
             arguments=arguments,
             function_name=chosen_fn,
-            text=content or None,
-            reasoning_content=message.get(self._reasoning_field) or None,
+            text=visible or None,
+            reasoning_content=reasoning,
             request_id=request_id,
-            model=str(payload.get("model", self.model)),
+            model=str(payload.get("model", self._effective_model(request))),
             usage=usage,
             finish_reason=finish_reason_opt(payload),
             raw=payload,
@@ -1030,9 +1167,9 @@ class GigaChatAsyncClient:
         failures. Refresh credentials once on 401, as in generate_stream.
         """
         body: dict[str, Any] = {
-            "model": self.model,
+            "model": self._effective_model(request),
             "messages": _build_text_messages(request, tool_turns=False),
-            "max_tokens": self._clip_max_tokens(request.max_tokens),
+            "max_tokens": self._clip_max_tokens(request.max_tokens, self._effective_model(request)),
             "stream": True,
         }
         self._apply_sampling(body, request.temperature)
@@ -1040,6 +1177,7 @@ class GigaChatAsyncClient:
         if effort:
             body["reasoning_effort"] = effort
         self._apply_reasoning_disable(body)
+        self._apply_extra_body(body)
 
         sem = self._ensure_semaphore()
         if sem is None:
@@ -1063,12 +1201,9 @@ class GigaChatAsyncClient:
 
         while True:
             rquid = str(uuid.uuid4())
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "RqUID": rquid,
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream",
-            }
+            headers = self._chat_headers(
+                token, rquid, Accept="text/event-stream",
+            )
             try:
                 async with client.stream(
                     "POST", url, json=body, headers=headers
@@ -1092,6 +1227,7 @@ class GigaChatAsyncClient:
 
                     request_id = resp.headers.get("x-request-id") or rquid
                     tool_acc = ToolCallAccumulator()
+                    parser = ReasoningContentParser()
                     finish_reason: str | None = None
                     usage: LLMUsage | None = None
                     async for payload in iter_sse_payloads(resp.aiter_lines()):
@@ -1107,15 +1243,25 @@ class GigaChatAsyncClient:
                                 finish_reason = fr
                         if payload.get("usage"):
                             usage = LLMUsage.from_raw(payload["usage"])
-                        for ev in events_from_sse_payload(
+                        events = events_from_sse_payload(
                             payload,
                             request_id=request_id,
                             tool_acc=tool_acc,
                             reasoning_field=self._reasoning_field,
-                        ):
+                        )
+                        for ev in events:
                             if isinstance(ev, ContentDelta):
                                 agg.append(ev.delta_text)
+                        for ev in self._events_with_think(parser, events):
                             yield ev
+                    tail = parser.flush()
+                    if tail.reasoning_content:
+                        yield ReasoningDelta(
+                            delta_reasoning=tail.reasoning_content,
+                            request_id=request_id,
+                        )
+                    if tail.content:
+                        yield ContentDelta(delta_text=tail.content, request_id=request_id)
                     for stop in tool_acc.finalize(request_id=request_id):
                         yield stop
                     yield Complete(
@@ -1137,7 +1283,7 @@ class GigaChatAsyncClient:
             finally:
                 # Scan partial output for canaries as in generate_stream. The aggregate is empty
                 # during a 401 retry, so the scan is a no-op.
-                _check_response_canary(
+                self._check_response_canary(
                     "".join(agg), context="gigachat.generate_stream_events"
                 )
 
@@ -1200,7 +1346,7 @@ class GigaChatAsyncClient:
                     fn_obj.get("arguments", {})
                 )
 
-        if request.tools:
+        if request.tools and not self._forbids_silent_recovery:
             allowed = {t.get("name") for t in request.tools if t.get("name")}
             content = message.get("content") or ""
             m = self._PSEUDO_FN_RE.match(content)
@@ -1211,6 +1357,79 @@ class GigaChatAsyncClient:
                     args = {}
                 return m.group(1), args if isinstance(args, dict) else {}
         return None, {}
+
+    def _visible_and_reasoning(self, message: dict[str, Any]) -> tuple[str, str | None]:
+        """Read the configured reasoning field, falling back to ``<think>`` tags in content."""
+        field = message.get(self._reasoning_field)
+        return split_reasoning_content(
+            message.get("content") or "",
+            field if isinstance(field, str) else None,
+        )
+
+    @staticmethod
+    def _apply_think_chunk(
+        parser: ReasoningContentParser,
+        chunk: LLMStreamChunk,
+        *,
+        flush: bool,
+    ) -> LLMStreamChunk:
+        """Move think tags from a text delta into reasoning. A provider reasoning delta on the
+        same chunk wins. flush releases a tag prefix held across earlier deltas.
+        """
+        parsed = parser.feed(chunk.delta_text)
+        visible = parsed.content
+        extracted = parsed.reasoning_content
+        if flush:
+            tail = parser.flush()
+            visible += tail.content
+            extracted += tail.reasoning_content
+        reasoning = chunk.delta_reasoning or extracted
+        if visible == chunk.delta_text and reasoning == chunk.delta_reasoning:
+            return chunk
+        return chunk.model_copy(update={"delta_text": visible, "delta_reasoning": reasoning})
+
+    @staticmethod
+    def _events_with_think(
+        parser: ReasoningContentParser,
+        events: list[StreamEvent],
+    ) -> list[StreamEvent]:
+        """Rewrite content events so think tags become reasoning deltas. A reasoning delta
+        already present in this payload stays the source for that payload.
+        """
+        has_field = any(isinstance(ev, ReasoningDelta) and ev.delta_reasoning for ev in events)
+        rewritten: list[StreamEvent] = []
+        for ev in events:
+            if not isinstance(ev, ContentDelta):
+                rewritten.append(ev)
+                continue
+            parsed = parser.feed(ev.delta_text)
+            if parsed.reasoning_content and not has_field:
+                rewritten.append(
+                    ReasoningDelta(
+                        delta_reasoning=parsed.reasoning_content,
+                        request_id=ev.request_id,
+                    )
+                )
+            if parsed.content:
+                rewritten.append(
+                    ContentDelta(delta_text=parsed.content, request_id=ev.request_id)
+                )
+        return rewritten
+
+    def _json_schema_arguments(self, content: str) -> dict[str, Any] | None:
+        """Parse native JSON Schema content.
+
+        Recovery accepts fences and a JSON object buried in prose. With
+        ``no_degrade`` or ``fallback_policy="preserve"`` only a JSON object
+        that is the whole content counts.
+        """
+        if not self._forbids_silent_recovery:
+            return self._parse_json_content(content)
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     @staticmethod
     def _parse_json_content(content: str) -> dict[str, Any] | None:
@@ -1254,7 +1473,7 @@ class GigaChatAsyncClient:
     def _legacy_messages(self, request: LLMRequest) -> list[dict[str, Any]]:
         """Convert conversation history to legacy function turns."""
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": apply_canary(request.system)},
+            {"role": "system", "content": _apply_canary(request.system)},
         ]
         # Remember the latest function name when converting role=tool to role=function.
         last_tool_name = ""

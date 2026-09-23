@@ -5,10 +5,12 @@ and response parsing directly without HTTP. Construct clients inside async helpe
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from typing import Any
 
 import pytest
+import respx
 
 from llm_mesh.types import LLMRequest, LLMResponse, LLMValidationError
 
@@ -50,17 +52,26 @@ def _make_request(*, mode: str = "function_call", schema: dict | None = None) ->
     )
 
 
-async def _make_client_async():
+async def _make_client_async(**kwargs):
     """Construct a GigaChat client inside a coroutine."""
     from llm_mesh.gigachat.client import GigaChatAsyncClient as GigaChatClient
     for k in list(os.environ):
         if k.startswith("GIGACHAT_") or k.startswith("GIGAPERS_") or k.startswith("GIGACORP_"):
             os.environ.pop(k, None)
-    return GigaChatClient(tool_choice="auto", use_model_token_limits=False, model="GigaChat-3-Ultra", credentials="k", api_url="http://x", scope="s")
+    values = dict(
+        tool_choice="auto",
+        use_model_token_limits=False,
+        model="GigaChat-3-Ultra",
+        credentials="k",
+        api_url="http://x",
+        scope="s",
+    )
+    values.update(kwargs)
+    return GigaChatClient(**values)
 
 
-def _make_client():
-    return _run(_make_client_async())
+def _make_client(**kwargs):
+    return _run(_make_client_async(**kwargs))
 
 
 # --- Request body shape -----------------------------------------------------
@@ -490,3 +501,118 @@ class TestParseJsonContentHelper:
     def test_variants(self, content, expected):
         from llm_mesh.gigachat.client import GigaChatAsyncClient as GigaChatClient
         assert GigaChatClient._parse_json_content(content) == expected
+
+
+def test_no_degrade_rejects_fenced_json_schema():
+    """A fence is salvage. no_degrade must not accept it as native JSON."""
+    client = _make_client(no_degrade=True)
+    content = '```json\n{"answer": "42", "category": "factual"}\n```'
+    payload = {
+        "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+        "usage": {},
+        "model": "GigaChat-3-Ultra",
+    }
+    with pytest.raises(LLMValidationError, match="forbids salvage"):
+        client._parse_response(payload, _make_request(mode="json_schema"))
+
+
+def test_no_degrade_accepts_raw_json_schema():
+    client = _make_client(no_degrade=True)
+    content = '{"answer": "42", "category": "factual"}'
+    payload = {
+        "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+        "usage": {},
+        "model": "GigaChat-3-Ultra",
+    }
+    response = client._parse_response(payload, _make_request(mode="json_schema"))
+    assert response.arguments == {"answer": "42", "category": "factual"}
+
+
+def test_preserve_ignores_a_prose_function_envelope():
+    """Prose that looks like a call is not a function_call under preserve."""
+    client = _make_client(fallback_policy="preserve")
+    payload = {
+        "choices": [{
+            "message": {"content": 'final_answer\n{"answer": "no data"}'},
+            "finish_reason": "stop",
+        }],
+        "usage": {},
+        "model": "GigaChat-2",
+    }
+    response = client._parse_response(payload, _tools_request())
+    assert response.function_name is None
+    assert response.text == 'final_answer\n{"answer": "no data"}'
+
+
+def test_extra_body_does_not_replace_model_or_response_format(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_EXTRA_BODY",
+        '{"repetition_penalty": 1.1, "model": "nope", "response_format": {"type": "text"}}',
+    )
+    client = _make_client()
+    body = client._build_body(_make_request(mode="json_schema"))
+    assert body["repetition_penalty"] == 1.1
+    assert body["model"] == "GigaChat-3-Ultra"
+    assert body["response_format"]["type"] == "json_schema"
+
+
+@respx.mock
+def test_extra_body_and_headers_are_sent_on_generate_text(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_EXTRA_BODY",
+        '{"repetition_penalty": 1.05, "model": "nope"}',
+    )
+    monkeypatch.setenv("LLM_EXTRA_HEADERS", '{"X-Project": "p"}')
+    route = respx.post("http://x/chat/completions").respond(200, json={
+        "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+        "usage": {},
+        "model": "GigaChat-3-Ultra",
+    })
+
+    async def go():
+        from llm_mesh.gigachat.client import GigaChatAsyncClient
+        client = GigaChatAsyncClient(
+            token="t",
+            model="GigaChat-3-Ultra",
+            api_url="http://x",
+            use_model_token_limits=False,
+        )
+        try:
+            await client.generate_text(
+                LLMRequest(system="s", user="u", max_tokens=8),
+            )
+        finally:
+            await client.aclose()
+
+    _run(go())
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["repetition_penalty"] == 1.05
+    assert sent["model"] == "GigaChat-3-Ultra"
+    assert route.calls.last.request.headers["X-Project"] == "p"
+    assert route.calls.last.request.headers["Authorization"] == "Bearer t"
+
+
+def test_invalid_extra_body_is_ignored(monkeypatch):
+    monkeypatch.setenv("LLM_EXTRA_BODY", "not-json")
+    client = _make_client()
+    body = client._build_body(_make_request())
+    assert "repetition_penalty" not in body
+
+
+def test_extra_headers_do_not_replace_auth(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_EXTRA_HEADERS",
+        '{"X-Project": "p", "Authorization": "Bearer stolen"}',
+    )
+    client = _make_client()
+    headers = client._chat_headers("real-token", "rq-1", Accept="text/event-stream")
+    assert headers["Authorization"] == "Bearer real-token"
+    assert headers["RqUID"] == "rq-1"
+    assert headers["X-Project"] == "p"
+    assert headers["Accept"] == "text/event-stream"
+    assert headers["Content-Type"] == "application/json"
+
+
+def test_unknown_fallback_policy_is_rejected():
+    with pytest.raises(ValueError, match="fallback_policy"):
+        _make_client(fallback_policy="drop")

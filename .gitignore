@@ -8,3 +8,4 @@ dist/
 .env
 .env.*
 .extraction-backup
+.zcodeignore

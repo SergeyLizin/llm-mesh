@@ -292,4 +292,3 @@ def extract_json_array_from_text(text: str) -> list[Any]:
                         f"JSON array cannot be parsed: {exc}; payload: {candidate[:300]}"
                     ) from exc
     raise RuntimeError(f"No balanced JSON array found in text response: {text[:200]!r}")
-    raise RuntimeError(f"Unclosed JSON object in text response: {text[:200]!r}")

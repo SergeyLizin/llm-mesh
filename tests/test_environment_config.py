@@ -14,6 +14,7 @@ from llm_mesh.models_catalog import _MANAGED_ENV, apply_route_env, make_client, 
 def clean_connections(monkeypatch):
     for key in _MANAGED_ENV:
         monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("LLM_BATCH_MODE", raising=False)
     yield
     for key in _MANAGED_ENV:
         os.environ.pop(key, None)
@@ -118,3 +119,16 @@ def test_standalone_options_and_runtime_defaults(monkeypatch):
     assert get_env("LLM_MAX_RETRIES") == "7"
     assert get_env("LLM_MAX_OUTPUT_TOKENS") == "200"
     assert read_options()["reasoning_off"] == {}
+
+
+def test_garbage_timeout_and_retries_keep_defaults(monkeypatch, caplog):
+    monkeypatch.setenv("LLM_HTTP_TIMEOUT", "soon")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "lots")
+    with caplog.at_level("WARNING"):
+        client = OpenAIClient(base_url="https://example.test", api_key="test-key")
+        giga = GigaChatAsyncClient(token="tok")
+    assert client._http_timeout == 600.0
+    assert client._max_retries == 3
+    assert giga._timeout.read == 600.0
+    assert "LLM_HTTP_TIMEOUT" in caplog.text
+    assert "LLM_MAX_RETRIES" in caplog.text
