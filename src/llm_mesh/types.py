@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # --- Errors -----------------------------------------------------------------
@@ -27,6 +28,19 @@ class LLMRequestBlocked(LLMError):
     def __init__(self, message: str, *, reason: str) -> None:
         super().__init__(message)
         self.reason = reason
+
+
+class LLMBudgetExceeded(LLMError):
+    """Accumulated spend reached a ceiling before this call was sent.
+
+    This is not LLMValidationError. Tier ladders and length-retry catch
+    validation errors and may try again. A budget refusal is final: it is
+    not retried and it is not degradation.
+
+    A ceiling in one currency does not convert or account the other. A
+    route that reports both ``cost_usd`` and ``cost_rub`` needs both
+    fields set, or the unconfigured currency is not a limit.
+    """
 
 
 class LLMAuthError(LLMError):
@@ -95,6 +109,102 @@ class LLMRequest(BaseModel):
     # without tools. GigaChat legacy functions simplify schemas, while its native json_schema
     # path retains them.
     mode: str = "function_call"
+    # Transport knobs for this call. None keeps the client constructor, which
+    # itself falls back to the env default. A set field wins over both.
+    # Negative values are rejected at dispatch. Batch clients and
+    # count_tokens stay on the constructor timeout except where the method
+    # they call already accepts one. Retries on those paths are
+    # constructor-scoped.
+    timeout_s: float | None = None
+    max_retries: int | None = None
+    # Images on the current user turn. An empty list is text-only and does
+    # not change the request body. History turns are not image carriers.
+    # The canary scans system text, user text, and model output. It does
+    # not read image bytes. Image bytes are not written to logs.
+    images: list["ImageAttachment"] = Field(default_factory=list)
+
+
+_IMAGE_MEDIA_TYPES = frozenset({
+    "image/png", "image/jpeg", "image/gif", "image/webp",
+})
+
+
+class ImageAttachment(BaseModel):
+    """One image on the current user turn. Exactly one of ``url`` or ``data``.
+
+    ``media_type`` defaults to ``image/png`` when ``data`` is set. A set
+    type must be png, jpeg, gif, or webp. The canary does not scan the
+    bytes, and nothing in the library logs them.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str | None = None
+    data: bytes | None = None
+    media_type: str | None = None
+
+    @model_validator(mode="after")
+    def _one_source(self) -> "ImageAttachment":
+        has_url = self.url is not None
+        has_data = self.data is not None
+        if has_url == has_data:
+            raise ValueError("ImageAttachment requires exactly one of url or data")
+        if has_data and not self.media_type:
+            self.media_type = "image/png"
+        if self.media_type is not None and self.media_type not in _IMAGE_MEDIA_TYPES:
+            allowed = ", ".join(sorted(_IMAGE_MEDIA_TYPES))
+            raise ValueError(f"media_type must be one of {allowed}")
+        return self
+
+    def openai_url(self) -> str:
+        """URL for an OpenAI image_url part. Bytes become a data URL."""
+        if self.url is not None:
+            return self.url
+        encoded = base64.b64encode(self.data or b"").decode("ascii")
+        return f"data:{self.media_type};base64,{encoded}"
+
+    def anthropic_block(self) -> dict[str, Any]:
+        """Messages API image block.
+
+        ``anthropic-version`` ``2023-06-01`` accepts both base64 and url
+        sources. There is no newer version header; url was added on this one.
+        """
+        if self.data is not None:
+            encoded = base64.b64encode(self.data).decode("ascii")
+            return {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": self.media_type,
+                    "data": encoded,
+                },
+            }
+        return {
+            "type": "image",
+            "source": {"type": "url", "url": self.url},
+        }
+
+    def gemini_part(self) -> dict[str, Any]:
+        """generateContent part. Public URLs are not a part kind here.
+
+        The REST body is camelCase, the same as ``functionCall`` and
+        ``generationConfig``. ``inline_data`` is ignored by the API, so the
+        call would succeed as text and the image would never arrive.
+        """
+        if self.url is not None:
+            raise LLMValidationError(
+                "Gemini: generateContent has no public-URL image input; "
+                "pass image bytes"
+            )
+        return {
+            "inlineData": {
+                "mimeType": self.media_type,
+                "data": base64.b64encode(self.data or b"").decode("ascii"),
+            },
+        }
+
+
+LLMRequest.model_rebuild()
 
 
 class LLMUsage(BaseModel):
@@ -209,6 +319,52 @@ class LLMUsage(BaseModel):
         )
 
 
+class Budget(BaseModel):
+    """Independent ceilings for one client instance.
+
+    ``None`` means that dimension is not limited. Dollars and rubles are
+    not converted into each other. Tokens come from ``LLMUsage.total_tokens``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_cost_usd: float | None = None
+    max_cost_rub: float | None = None
+    max_total_tokens: int | None = None
+
+
+class BudgetState(BaseModel):
+    """Accumulated spend. ``budget_state`` returns a copy, not the ledger."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cost_usd: float = 0.0
+    cost_rub: float = 0.0
+    total_tokens: int = 0
+
+
+class CallRecord(BaseModel):
+    """One interactive call, emitted after it finishes.
+
+    Batch clients are not instrumented: a file batch is not one call, and
+    the coalescer would double-count work the inner client already records
+    when it is used directly. ``count_tokens`` is included because it is a
+    client call, even though it does not send an ``LLMRequest``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    model: str
+    method: str
+    tier: str | None = None
+    latency_ms: int
+    ok: bool
+    error_type: str | None = None
+    request_id: str | None = None
+    usage: LLMUsage | None = None
+
+
 class LLMResponse(BaseModel):
     """An LLM response with parsed function arguments and metadata."""
 
@@ -236,6 +392,10 @@ class LLMResponse(BaseModel):
     model: str
     usage: LLMUsage = Field(default_factory=LLMUsage)
     raw: dict[str, Any] | None = None  # Raw response for diagnostics when needed.
+    # How many corrective schema re-asks this response includes. Zero is the
+    # first answer. One means the model was shown the validation error and
+    # answered again. Measurement modes (no_degrade, preserve) stay at zero.
+    validation_reasks: int = 0
 
 
 class LLMStreamChunk(BaseModel):

@@ -21,7 +21,7 @@ import logging
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from llm_mesh.types import LLMRequest, LLMRequestBlocked
+from llm_mesh.types import CallRecord, LLMRequest, LLMRequestBlocked
 
 from .canary import (
     build_canary_prompt as _default_build_prompt,
@@ -90,8 +90,8 @@ def apply_request_guard(request: LLMRequest, *, provider: str) -> LLMRequest:
     """Translate the hook result into a request or LLMRequestBlocked.
 
     None is a refusal. The warning names the provider and carries the
-    REQUEST_BLOCKED marker. The payload is not logged. A hook exception is
-    not caught here.
+    REQUEST_BLOCKED marker. The payload is not logged, including image
+    bytes. A hook exception is not caught here.
     """
     result = check_request(request)
     if result is None:
@@ -127,3 +127,39 @@ def guard_batch_requests(
                 raise
             blocked[index] = exc
     return accepted, blocked
+
+
+def identity_on_call(_record: CallRecord) -> None:
+    """Ignore the record. This is the default metrics hook."""
+    return None
+
+
+_on_call: Callable[[CallRecord], None] = identity_on_call
+
+
+def configure_metrics_hook(*, on_call: Callable[[CallRecord], None]) -> None:
+    """Replace the process-wide metrics hook.
+
+    ``on_call`` is synchronous. It must not block or await. One hook serves
+    every client and thread, like the request guard. Batch clients do not
+    emit records: file submission is not an interactive call, and recording
+    it beside the interactive path would double-count.
+    """
+    global _on_call
+    _on_call = on_call
+
+
+def emit_call_record(record: CallRecord) -> None:
+    """Deliver one record. A hook failure is logged and swallowed.
+
+    Telemetry must not change the outcome of the call. The log line carries
+    the METRICS_HOOK_FAILED marker, the provider, and the method. It does
+    not include the request or the response.
+    """
+    try:
+        _on_call(record)
+    except Exception as exc:
+        logger.warning(
+            "METRICS_HOOK_FAILED provider=%s method=%s error=%s",
+            record.provider, record.method, type(exc).__name__,
+        )

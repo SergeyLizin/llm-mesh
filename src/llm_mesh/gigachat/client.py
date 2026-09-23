@@ -58,6 +58,7 @@ from llm_mesh.stream_events import (
 from llm_mesh._streaming import events_from_sse_payload, ToolCallAccumulator
 
 from llm_mesh.types import (
+    Budget,
     LLMAuthError,
     LLMError,
     LLMRequest,
@@ -153,6 +154,9 @@ class GigaChatAsyncClient(BaseLLMClient):
     fenced JSON and prose function envelopes. ``LLM_EXTRA_BODY`` and
     ``LLM_EXTRA_HEADERS`` merge onto chat requests; fields the client
     already set win.
+
+    Legacy functions chat has no image input. A request with images
+    raises ``LLMValidationError`` before any HTTP.
     """
 
     # TOOLS_REQUIRED is absent. generate_structured raises LLMValidationError
@@ -197,6 +201,7 @@ class GigaChatAsyncClient(BaseLLMClient):
         use_model_token_limits: bool = True,
         no_degrade: bool | None = None,
         fallback_policy: Literal["recover", "preserve"] = "recover",
+        budget: Budget | None = None,
     ) -> None:
         if tool_choice not in ("single", "auto"):
             raise ValueError("tool_choice must be 'single' or 'auto'")
@@ -295,6 +300,16 @@ class GigaChatAsyncClient(BaseLLMClient):
                 "GigaChat: provide `credentials` (base64 ClientID:Secret) "
                 "or `token`, or set env LLM_API_KEY"
             )
+        self._bind_budget(budget)
+
+    def _timeout_of(self, seconds: float) -> httpx.Timeout:
+        """Per-call timeout with the constructor's connect split.
+
+        The read budget follows the request. Connect stays at 30s, matching
+        the client built in ``__init__``, so a short generation timeout does
+        not also shrink the handshake.
+        """
+        return httpx.Timeout(seconds, connect=30.0)
 
     async def __aenter__(self) -> GigaChatAsyncClient:
         # Reuse an already opened transport. Replacing it here used to drop
@@ -304,6 +319,20 @@ class GigaChatAsyncClient(BaseLLMClient):
 
     async def __aexit__(self, *_: Any) -> None:
         await self.aclose()
+
+    def _guarded_request(self, request: LLMRequest) -> LLMRequest:
+        # The hook sees the attachments and may refuse or replace the
+        # request. The provider limit applies to whatever remains.
+        request = super()._guarded_request(request)
+        self._reject_images(request)
+        return request
+
+    @staticmethod
+    def _reject_images(request: LLMRequest) -> None:
+        if request.images:
+            raise LLMValidationError(
+                "GigaChat: legacy functions chat has no image input"
+            )
 
     def _check_response_canary(self, response_text: str, *, context: str) -> None:
         """Scan text and serialized function arguments for the active canary.
@@ -322,6 +351,12 @@ class GigaChatAsyncClient(BaseLLMClient):
         tokenizer rather than a character heuristic and is intended for preflight context-budget
         checks, not a hot agent loop. Respect concurrency limits and refresh once on 401.
         """
+        async with self._observe("count_tokens", model=model):
+            return await self._count_tokens_impl(texts, model=model)
+
+    async def _count_tokens_impl(
+        self, texts: "list[str]", *, model: str | None = None
+    ) -> list[int]:
         if not texts:
             return []
         body = {"model": model or self.model, "input": list(texts)}
@@ -340,6 +375,7 @@ class GigaChatAsyncClient(BaseLLMClient):
                 url,
                 json=body,
                 headers=self._chat_headers(token, str(uuid.uuid4())),
+                **self._timeout_kw(),
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -458,13 +494,14 @@ class GigaChatAsyncClient(BaseLLMClient):
         last_status: int | None = None
         last_text: str = ""
         client = self._ensure_http()
-        max_attempts = max(5, self._max_transient_retries + 1)
+        max_attempts = max(5, self._retry_limit(self._max_transient_retries) + 1)
 
         for scope in scopes:
             for attempt in range(max_attempts):
                 try:
                     resp = await client.post(
                         self._auth_url,
+                        **self._timeout_kw(),
                         headers={
                             "Authorization": f"Basic {self._credentials}",
                             "RqUID": str(uuid.uuid4()),
@@ -620,7 +657,7 @@ class GigaChatAsyncClient(BaseLLMClient):
         url = f"{self._api_url}/chat/completions"
 
         # --- transient retry-loop ---
-        for transient_attempt in range(self._max_transient_retries + 1):
+        for transient_attempt in range(self._retry_limit(self._max_transient_retries) + 1):
             retry_delay: float | None = None  # Set after observing a retryable HTTP status.
             try:
                 # --- token-refresh loop (orthogonal) ---
@@ -631,6 +668,7 @@ class GigaChatAsyncClient(BaseLLMClient):
                             url,
                             json=body,
                             headers=self._chat_headers(token, rquid),
+                            **self._timeout_kw(),
                         )
                     except (
                         httpx.TimeoutException,
@@ -687,7 +725,7 @@ class GigaChatAsyncClient(BaseLLMClient):
 
                 # Back off and retry after a retryable 5xx or 429 response.
                 if retry_delay is not None:
-                    if transient_attempt < self._max_transient_retries:
+                    if transient_attempt < self._retry_limit(self._max_transient_retries):
                         await asyncio.sleep(retry_delay)
                         continue
                     raise LLMError(
@@ -702,14 +740,14 @@ class GigaChatAsyncClient(BaseLLMClient):
                 httpx.NetworkError,
                 httpx.RemoteProtocolError,
             ) as exc:
-                if transient_attempt < self._max_transient_retries:
+                if transient_attempt < self._retry_limit(self._max_transient_retries):
                     delay = backoff_with_jitter(self._transient_backoff_s, transient_attempt)
                     logger.warning(
                         "GigaChat: %s → retry in %.1fs (attempt %d/%d)",
                         type(exc).__name__,
                         delay,
                         transient_attempt + 1,
-                        self._max_transient_retries,
+                        self._retry_limit(self._max_transient_retries),
                     )
                     await asyncio.sleep(delay)
                     continue
@@ -761,7 +799,7 @@ class GigaChatAsyncClient(BaseLLMClient):
         token = await self._ensure_token()
         client = self._ensure_http()
         url = f"{self._api_url}/embeddings"
-        max_attempts = self._max_transient_retries + 1
+        max_attempts = self._retry_limit(self._max_transient_retries) + 1
         for attempt in range(max_attempts):
             refreshed = False
             while True:
@@ -770,6 +808,7 @@ class GigaChatAsyncClient(BaseLLMClient):
                         url,
                         json=body,
                         headers=self._chat_headers(token, str(uuid.uuid4())),
+                        **self._timeout_kw(),
                     )
                 except (
                     httpx.TimeoutException,
@@ -826,6 +865,12 @@ class GigaChatAsyncClient(BaseLLMClient):
         """Generate plain text without functions or tools. Suitable for code or prose generation
         where function calling is unnecessary; parse message.content as text.
         """
+        async with self._observe("generate_text", request) as observed:
+            response = await self._generate_text_impl(request)
+            observed.note(response)
+            return response
+
+    async def _generate_text_impl(self, request: LLMRequest) -> LLMResponse:
         request = self._guarded_request(request)
         body = {
             "model": self._effective_model(request),
@@ -894,6 +939,19 @@ class GigaChatAsyncClient(BaseLLMClient):
         calls are not streamed as argument deltas; use generate_structured for structured
         output.
         """
+        async with self._observe("generate_stream", request) as observed:
+            impl = self._generate_stream_impl(request)
+            async with self._close_agen(impl):
+                while True:
+                    try:
+                        chunk = await anext(impl)
+                    except StopAsyncIteration:
+                        break
+                    yield observed.note(chunk)
+
+    async def _generate_stream_impl(
+        self, request: LLMRequest
+    ) -> AsyncIterator[LLMStreamChunk]:
         request = self._guarded_request(request)
         body: dict[str, Any] = {
             "model": self._effective_model(request),
@@ -931,7 +989,8 @@ class GigaChatAsyncClient(BaseLLMClient):
             agg: list[str] = []  # Per-attempt state; finally scans any partial output.
             try:
                 async with client.stream(
-                    "POST", url, json=body, headers=headers
+                    "POST", url, json=body, headers=headers,
+                    **self._timeout_kw(),
                 ) as resp:
                     if resp.status_code == 401 and not refreshed:
                         await resp.aread()
@@ -996,7 +1055,16 @@ class GigaChatAsyncClient(BaseLLMClient):
         functions cannot provide the modern required-tool selection contract. The caller can
         then choose text emulation rather than mistaking a forced single function for a
         model-selected tool.
+
+        Arguments are not checked against the JSON Schema. There is no
+        corrective re-ask: a legacy function call is returned as parsed.
         """
+        async with self._observe("generate_structured", request) as observed:
+            response = await self._generate_structured_impl(request)
+            observed.note(response)
+            return response
+
+    async def _generate_structured_impl(self, request: LLMRequest) -> LLMResponse:
         request = self._guarded_request(request)
         if request.tools_required:
             raise LLMValidationError(
@@ -1059,6 +1127,7 @@ class GigaChatAsyncClient(BaseLLMClient):
         function_call mode uses legacy functions: auto selection with request.tools or one
         forced request.function_name. Convert history to the same legacy wire format.
         """
+        self._reject_images(request)
         messages = (self._legacy_messages(request) if self._tool_choice == "auto"
                     else _build_text_messages(request, tool_turns=False))
         body: dict[str, Any] = {
@@ -1272,6 +1341,19 @@ class GigaChatAsyncClient(BaseLLMClient):
         events are emitted; use generate_structured for those. Emit Error and re-raise transport
         failures. Refresh credentials once on 401, as in generate_stream.
         """
+        async with self._observe("generate_stream_events", request) as observed:
+            impl = self._generate_stream_events_impl(request)
+            async with self._close_agen(impl):
+                while True:
+                    try:
+                        event = await anext(impl)
+                    except StopAsyncIteration:
+                        break
+                    yield observed.note(event)
+
+    async def _generate_stream_events_impl(
+        self, request: LLMRequest
+    ) -> AsyncIterator[StreamEvent]:
         request = self._guarded_request(request)
         body: dict[str, Any] = {
             "model": self._effective_model(request),
@@ -1313,7 +1395,8 @@ class GigaChatAsyncClient(BaseLLMClient):
             )
             try:
                 async with client.stream(
-                    "POST", url, json=body, headers=headers
+                    "POST", url, json=body, headers=headers,
+                    **self._timeout_kw(),
                 ) as resp:
                     if resp.status_code == 401 and not refreshed:
                         await resp.aread()

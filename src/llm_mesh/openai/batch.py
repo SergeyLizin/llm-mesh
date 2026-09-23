@@ -24,7 +24,10 @@ import httpx
 
 from llm_mesh._common import _env_float_default, _env_is_disabled
 from llm_mesh.config import get_env
+from llm_mesh.base import BudgetLedger
 from llm_mesh.types import (
+    Budget,
+    BudgetState,
     LLMAuthError,
     LLMError,
     LLMRequest,
@@ -115,6 +118,7 @@ class OpenAIBatchClient:
         max_wait_s: float | None = None,
         http_retries: int | None = None,
         backoff_start_s: float | None = None,
+        budget: Budget | None = None,
     ) -> None:
         if client is None and not api_key:
             raise LLMAuthError(
@@ -155,6 +159,13 @@ class OpenAIBatchClient:
             if backoff_start_s is not None
             else _env_float("LLM_BATCH_429_BACKOFF_START", 1.0)
         )
+        self._budget_ledger = BudgetLedger(budget)
+
+    def reset_budget(self) -> None:
+        self._budget_ledger.reset()
+
+    def budget_state(self) -> BudgetState:
+        return self._budget_ledger.state()
 
     def _http(self) -> httpx.AsyncClient:
         if self._external_client is not None:
@@ -417,6 +428,7 @@ class OpenAIBatchClient:
             raise OpenAIBatchError(
                 "OpenAIBatchClient: a completion client is required to build request bodies"
             )
+        self._budget_ledger.check(self._openai.PROVIDER)
         from llm_mesh.hooks import guard_batch_requests
 
         provider = self._openai.PROVIDER
@@ -479,6 +491,7 @@ class OpenAIBatchClient:
                 out.append(err)
             else:
                 assert response is not None
+                self._budget_ledger.add(response.usage)
                 out.append(response)
         return out
 

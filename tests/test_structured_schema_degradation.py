@@ -90,7 +90,8 @@ async def test_schema_invalid_toolcall_degrades_to_text(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "k")
     route = respx.post(URL).mock(side_effect=[
         httpx.Response(200, json=_tool_call({"type": "date"})),   # Strict output violates the schema.
-        httpx.Response(200, json=_tool_call({"foo": "bar"})),     # Required output also violates the schema.
+        httpx.Response(200, json=_tool_call({"foo": "bar"})),     # One corrective re-ask, still invalid.
+        httpx.Response(200, json=_tool_call({"baz": 1})),         # Required output also violates the schema.
         httpx.Response(200, json=_text({"name": "Inspection report"})),  # Text output is valid.
     ])
     client = OpenAIClient(model="google/gemma-4-31b-it")
@@ -100,10 +101,14 @@ async def test_schema_invalid_toolcall_degrades_to_text(monkeypatch):
         await client.aclose()
     # Return the schema-valid text emulation result.
     assert resp.arguments == {"name": "Inspection report"}
-    assert route.call_count == 3
+    assert route.call_count == 4
     assert client._tool_choice_pref == "text"
+    # The re-ask is the same strict tier and carries the failure.
+    reask = json.loads(route.calls[1].request.content)
+    assert reask["tool_choice"]["type"] == "function"
+    assert "failed schema validation" in reask["messages"][-2]["content"]
     # The final text request contains no tools.
-    assert "tools" not in json.loads(route.calls[2].request.content)
+    assert "tools" not in json.loads(route.calls[3].request.content)
 
 
 @respx.mock

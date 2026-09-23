@@ -1,7 +1,8 @@
 """Built-in prompt-injection canary.
 
 Set a token with set_canary_context_token; clients append the marker to the
-system prompt and scan responses. Reset the token in a finally block.
+system prompt and scan response text. Image bytes are not scanned. Reset
+the token in a finally block.
 configure_canary_hooks remains available for a different prompt or detector.
 """
 

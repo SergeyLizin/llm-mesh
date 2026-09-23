@@ -25,6 +25,10 @@ from llm_mesh._common import (
     _env_nonneg_int,
     _env_positive_int,
     _args_satisfy_schema,
+    corrective_request,
+    merge_usage,
+    schema_violation_detail,
+    stamp_validation_reask,
     _parse_json_dict_env,
     apply_canary,
     warn_if_truncated,
@@ -35,7 +39,7 @@ from llm_mesh._retry import (
     retry_after_delay,
 )
 from llm_mesh._streaming import iter_sse_payloads
-from llm_mesh.base import BaseLLMClient, Capability
+from llm_mesh.base import BaseLLMClient, Capability, note_active_usage
 from llm_mesh.config import get_env
 from llm_mesh.stream_events import (
     Complete,
@@ -48,6 +52,7 @@ from llm_mesh.stream_events import (
     ToolUseStop,
 )
 from llm_mesh.types import (
+    Budget,
     LLMAuthError,
     LLMError,
     LLMRequest,
@@ -390,7 +395,13 @@ def build_contents(request: LLMRequest) -> tuple[str, list[dict[str, Any]]]:
     if contents and contents[0]["role"] != "user":
         contents.insert(0, {"role": "user", "parts": [{"text": _LEADING_USER_TEXT}]})
     user = request.user
-    if user or not contents or contents[-1]["role"] != "user":
+    if request.images:
+        # Current user turn only. A public URL is rejected here: this client
+        # has no file_data path, and generateContent does not fetch one.
+        parts: list[dict[str, Any]] = [{"text": user}] if user else []
+        parts.extend(image.gemini_part() for image in request.images)
+        append("user", parts)
+    elif user or not contents or contents[-1]["role"] != "user":
         append("user", [{"text": user}] if user else [])
     return system, contents
 
@@ -432,6 +443,7 @@ class GeminiClient(BaseLLMClient):
         no_degrade: bool | None = None,
         fallback_policy: Literal["recover", "preserve"] = "recover",
         validate_schema: bool = True,
+        budget: Budget | None = None,
     ) -> None:
         if fallback_policy not in ("recover", "preserve"):
             raise ValueError("fallback_policy must be 'recover' or 'preserve'")
@@ -485,6 +497,7 @@ class GeminiClient(BaseLLMClient):
         else:
             self._verify = not _env_is_disabled("LLM_VERIFY_SSL", default="1")
         self._client: httpx.AsyncClient | None = None
+        self._bind_budget(budget)
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -522,6 +535,74 @@ class GeminiClient(BaseLLMClient):
                     return params if isinstance(params, dict) else None
             return None
         return request.schema_
+
+    async def _reask_structured(
+        self,
+        request: LLMRequest,
+        response: LLMResponse,
+        schema: dict[str, Any] | None,
+        model: str,
+        *,
+        function_name: str | None = None,
+    ) -> LLMResponse:
+        """One corrective generateContent on a confirmed schema violation.
+
+        The second body is ``_body`` of the augmented request, the same
+        builder as the first call. Measurement modes do not enter.
+        """
+        if not self._validation_reask_allowed():
+            return response
+        detail = schema_violation_detail(response.arguments, schema)
+        if detail is None:
+            return response
+        follow = corrective_request(
+            request,
+            function_name=function_name or request.function_name,
+            failed_answer=json.dumps(response.arguments, ensure_ascii=False),
+            detail=detail,
+        )
+        payload, request_id = await self._send(
+            self._body(follow, structured=True),
+            model=model,
+            length_retry=follow.length_retry,
+        )
+        self._require_candidate(payload)
+        if request.mode == "json_schema":
+            content = text_of(payload)
+            arguments = _parse_json_object(content, salvage=self._can_degrade(follow))
+            if arguments is None:
+                # The second call already happened. Record both attempts, or
+                # the budget and the metrics record only see the first.
+                note_active_usage(merge_usage(
+                    response.usage,
+                    usage_from_gemini(payload.get("usageMetadata")),
+                ))
+                raise LLMValidationError(
+                    f"{self.PROVIDER}: response schema returned unparseable JSON "
+                    f"(content={content[:200]!r})",
+                    payload=payload,
+                )
+            second = self._response(
+                payload, follow, request_id=request_id,
+                arguments=arguments, function_name=request.function_name,
+            )
+        else:
+            second = self._response(payload, follow, request_id=request_id)
+        return stamp_validation_reask(response.usage, second)
+
+    def _require_or_note(
+        self,
+        response: LLMResponse,
+        schema: dict[str, Any] | None,
+        *,
+        arguments: dict[str, Any] | None = None,
+    ) -> None:
+        """Enforce the schema. A re-ask's summed usage is recorded if this raises."""
+        checked = response.arguments if arguments is None else arguments
+        if response.validation_reasks and not _args_satisfy_schema(checked, schema):
+            if self._validate_schema:
+                note_active_usage(response.usage)
+        self._require_schema(checked, schema)
 
     def _require_schema(
         self,
@@ -672,13 +753,15 @@ class GeminiClient(BaseLLMClient):
         url = generate_content_url(self._base, model, count=count, embed=embed)
         headers = self._headers()
         last_exc: Exception | None = None
-        for attempt in range(self._max_retries + 1):
+        for attempt in range(self._retry_limit(self._max_retries) + 1):
             try:
-                response = await self._ensure_http().post(url, headers=headers, json=body)
+                response = await self._ensure_http().post(
+                    url, headers=headers, json=body, **self._timeout_kw(),
+                )
             except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError,
                     httpx.NetworkError, httpx.RemoteProtocolError) as exc:
                 last_exc = exc
-                if attempt == self._max_retries:
+                if attempt == self._retry_limit(self._max_retries):
                     err_cls = (
                         LLMTimeoutError
                         if isinstance(exc, httpx.TimeoutException)
@@ -690,7 +773,7 @@ class GeminiClient(BaseLLMClient):
                     ) from exc
                 await asyncio.sleep(backoff_with_jitter(self._retry_backoff_s, attempt))
                 continue
-            if response.status_code in _RETRYABLE_STATUS and attempt < self._max_retries:
+            if response.status_code in _RETRYABLE_STATUS and attempt < self._retry_limit(self._max_retries):
                 delay = (
                     retry_after_delay(response, self._retry_backoff_s, attempt)
                     if response.status_code == 429
@@ -699,7 +782,7 @@ class GeminiClient(BaseLLMClient):
                 logger.warning(
                     "%s %s on attempt %d/%d — retry in %.1fs",
                     self.PROVIDER, response.status_code, attempt + 1,
-                    self._max_retries + 1, delay,
+                    self._retry_limit(self._max_retries) + 1, delay,
                 )
                 await asyncio.sleep(delay)
                 continue
@@ -800,6 +883,12 @@ class GeminiClient(BaseLLMClient):
         ``countTokens`` returns one total per request, so each string is its
         own user content. An empty list does not call the API.
         """
+        async with self._observe("count_tokens", model=model):
+            return await self._count_tokens_impl(texts, model=model)
+
+    async def _count_tokens_impl(
+        self, texts: list[str], *, model: str | None = None,
+    ) -> list[int]:
         if not texts:
             return []
         chosen = self._model_of(model=model)
@@ -883,6 +972,12 @@ class GeminiClient(BaseLLMClient):
 
     async def generate_text(self, request: LLMRequest) -> LLMResponse:
         """Generate plain text. Thought parts are returned separately."""
+        async with self._observe("generate_text", request) as observed:
+            response = await self._generate_text_impl(request)
+            observed.note(response)
+            return response
+
+    async def _generate_text_impl(self, request: LLMRequest) -> LLMResponse:
         request = self._guarded_request(request)
         model = self._model_of(request)
         body = self._body(request, structured=False)
@@ -912,7 +1007,19 @@ class GeminiClient(BaseLLMClient):
         is allowed. ``tools_required`` never falls back to text. Arguments
         that violate the schema raise ``LLMValidationError`` unless
         ``validate_schema`` is false.
+
+        A confirmed violation is sent back once on the same request
+        shape when validation is on and neither ``no_degrade`` nor
+        ``fallback_policy="preserve"`` is set. The second result is
+        what then raises. GigaChat does not do this; it does not
+        validate arguments.
         """
+        async with self._observe("generate_structured", request) as observed:
+            response = await self._generate_structured_impl(request)
+            observed.note(response)
+            return response
+
+    async def _generate_structured_impl(self, request: LLMRequest) -> LLMResponse:
         request = self._guarded_request(request)
         if request.mode == "text":
             return await self.generate_text(request)
@@ -951,12 +1058,14 @@ class GeminiClient(BaseLLMClient):
                     f"(content={content[:200]!r})",
                     payload=payload,
                 )
-            self._require_schema(arguments, request.schema_)
-            self._check_response_canary(content, context="generate_structured")
-            return self._response(
+            response = self._response(
                 payload, request, request_id=request_id,
                 arguments=arguments, function_name=request.function_name,
             )
+            response = await self._reask_structured(request, response, request.schema_, model)
+            self._require_or_note(response, request.schema_)
+            self._check_response_canary(response.text or "", context="generate_structured")
+            return response
         calls = function_calls_of(payload)
         if not calls:
             if request.tools and not request.tools_required:
@@ -968,13 +1077,27 @@ class GeminiClient(BaseLLMClient):
                 f"(content={text_of(payload)[:200]!r})",
                 payload=payload,
             )
-        for call in calls:
-            self._require_schema(
-                call["arguments"], self._schema_for(request, str(call["name"])),
+        schema = self._schema_for(request, str(calls[0]["name"]))
+        response = self._response(payload, request, request_id=request_id)
+        response = await self._reask_structured(
+            request, response, schema, model, function_name=str(calls[0]["name"]),
+        )
+        if response.validation_reasks and not response.tool_calls:
+            note_active_usage(response.usage)
+            raise LLMValidationError(
+                f"{self.PROVIDER}: missing functionCall "
+                f"(content={(response.text or '')[:200]!r})",
+                payload=response.raw,
             )
-        encoded = json.dumps(calls[0]["arguments"], ensure_ascii=False)
+        for call in response.tool_calls:
+            self._require_or_note(
+                response,
+                self._schema_for(request, str(call["name"])),
+                arguments=call["arguments"],
+            )
+        encoded = json.dumps(response.arguments, ensure_ascii=False)
         self._check_response_canary(encoded, context="generate_structured")
-        return self._response(payload, request, request_id=request_id)
+        return response
 
     async def _iter_payloads(
         self, body: dict[str, Any], *, model: str,
@@ -984,14 +1107,16 @@ class GeminiClient(BaseLLMClient):
         client = self._ensure_http()
         last_exc: Exception | None = None
         response: httpx.Response | None = None
-        for attempt in range(self._max_retries + 1):
+        for attempt in range(self._retry_limit(self._max_retries) + 1):
             try:
-                request = client.build_request("POST", url, headers=headers, json=body)
+                request = client.build_request(
+                    "POST", url, headers=headers, json=body, **self._timeout_kw(),
+                )
                 response = await client.send(request, stream=True)
             except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError,
                     httpx.NetworkError, httpx.RemoteProtocolError) as exc:
                 last_exc = exc
-                if attempt == self._max_retries:
+                if attempt == self._retry_limit(self._max_retries):
                     err_cls = (
                         LLMTimeoutError
                         if isinstance(exc, httpx.TimeoutException)
@@ -1003,7 +1128,7 @@ class GeminiClient(BaseLLMClient):
                     ) from exc
                 await asyncio.sleep(backoff_with_jitter(self._retry_backoff_s, attempt))
                 continue
-            if response.status_code in _RETRYABLE_STATUS and attempt < self._max_retries:
+            if response.status_code in _RETRYABLE_STATUS and attempt < self._retry_limit(self._max_retries):
                 status = response.status_code
                 delay = (
                     retry_after_delay(response, self._retry_backoff_s, attempt)
@@ -1015,7 +1140,7 @@ class GeminiClient(BaseLLMClient):
                 logger.warning(
                     "%s stream %s on attempt %d/%d — retry in %.1fs",
                     self.PROVIDER, status, attempt + 1,
-                    self._max_retries + 1, delay,
+                    self._retry_limit(self._max_retries) + 1, delay,
                 )
                 await asyncio.sleep(delay)
                 continue
@@ -1058,6 +1183,19 @@ class GeminiClient(BaseLLMClient):
         self, request: LLMRequest,
     ) -> AsyncIterator[LLMStreamChunk]:
         """Stream text and thought deltas, then one terminal chunk with usage."""
+        async with self._observe("generate_stream", request) as observed:
+            impl = self._generate_stream_impl(request)
+            async with self._close_agen(impl):
+                while True:
+                    try:
+                        chunk = await anext(impl)
+                    except StopAsyncIteration:
+                        break
+                    yield observed.note(chunk)
+
+    async def _generate_stream_impl(
+        self, request: LLMRequest,
+    ) -> AsyncIterator[LLMStreamChunk]:
         request = self._guarded_request(request)
         visible: list[str] = []
         try:
@@ -1105,6 +1243,19 @@ class GeminiClient(BaseLLMClient):
         self, request: LLMRequest,
     ) -> AsyncIterator[StreamEvent]:
         """Stream typed deltas, then one Complete. Errors are emitted and re-raised."""
+        async with self._observe("generate_stream_events", request) as observed:
+            impl = self._generate_stream_events_impl(request)
+            async with self._close_agen(impl):
+                while True:
+                    try:
+                        event = await anext(impl)
+                    except StopAsyncIteration:
+                        break
+                    yield observed.note(event)
+
+    async def _generate_stream_events_impl(
+        self, request: LLMRequest,
+    ) -> AsyncIterator[StreamEvent]:
         request = self._guarded_request(request)
         visible: list[str] = []
         try:

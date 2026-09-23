@@ -25,11 +25,14 @@ from llm_mesh._common import (
     _parse_json_dict_env,
     build_text_messages,
     _args_satisfy_schema,
+    corrective_request,
+    schema_violation_detail,
+    stamp_validation_reask,
     finish_reason_opt,
     post_with_length_retry,
     warn_if_truncated,
 )
-from llm_mesh.base import BaseLLMClient, Capability
+from llm_mesh.base import BaseLLMClient, Capability, note_active_usage
 from llm_mesh.openai._common import (
     _PEG_FORMAT_ERROR_RE,
     VENDOR_BODY_KEYS,
@@ -52,6 +55,7 @@ from llm_mesh.text_parsing import (
     extract_json_from_text,
 )
 from llm_mesh.types import (
+    Budget,
     LLMAuthError,
     LLMRequest,
     LLMResponse,
@@ -290,6 +294,7 @@ class OpenAIClient(BaseLLMClient):
         fallback_policy: Literal["recover", "preserve"] = "recover",
         tiktoken_encoding: str | None = None,
         rerank_protocol: str | None = None,
+        budget: Budget | None = None,
     ) -> None:
         if fallback_policy not in ("recover", "preserve"):
             raise ValueError("fallback_policy must be 'recover' or 'preserve'")
@@ -503,6 +508,7 @@ class OpenAIClient(BaseLLMClient):
             else _env_float_default("LLM_HTTP_TIMEOUT", 600.0, logger=logger)
         )
         self._client: httpx.AsyncClient | None = None
+        self._bind_budget(budget)
 
     @staticmethod
     def _env_first(names: tuple[str, ...]) -> str:
@@ -630,7 +636,8 @@ class OpenAIClient(BaseLLMClient):
         self, headers: dict[str, str], stream_body: dict[str, Any], body: dict[str, Any],
     ) -> _BufferedStreamResponse:
         async with self._ensure_http().stream(
-            "POST", self.URL, headers=headers, json=stream_body
+            "POST", self.URL, headers=headers, json=stream_body,
+            **self._timeout_kw(),
         ) as r:
             if r.status_code >= 400:
                 raw = (await r.aread()).decode("utf-8", "replace")
@@ -693,17 +700,19 @@ class OpenAIClient(BaseLLMClient):
             **self._extra_headers,
         }
         last_exc: Exception | None = None
-        for attempt in range(self._max_retries + 1):
+        for attempt in range(self._retry_limit(self._max_retries) + 1):
             try:
                 r = (
                     await self._stream_and_reconstruct(headers, body)
                     if self._stream_transport
-                    else await self._ensure_http().post(self.URL, headers=headers, json=body)
+                    else await self._ensure_http().post(
+                        self.URL, headers=headers, json=body, **self._timeout_kw(),
+                    )
                 )
             except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError,
                     httpx.NetworkError, httpx.RemoteProtocolError) as exc:
                 last_exc = exc
-                if attempt == self._max_retries:
+                if attempt == self._retry_limit(self._max_retries):
                     # Translate timeouts to LLMTimeoutError and other failures to OpenAIError.
                     err_cls = LLMTimeoutError if isinstance(exc, httpx.TimeoutException) else OpenAIError
                     raise err_cls(
@@ -715,7 +724,7 @@ class OpenAIClient(BaseLLMClient):
                 await asyncio.sleep(backoff_with_jitter(self._retry_backoff_s, attempt))
                 continue
 
-            if (r.status_code in RETRYABLE_STATUS and attempt < self._max_retries
+            if (r.status_code in RETRYABLE_STATUS and attempt < self._retry_limit(self._max_retries)
                     and not (r.status_code == 500 and r.text
                              and _PEG_FORMAT_ERROR_RE.search(r.text))):
                 # Do not retry a deterministic llama.cpp PEG-format 500 with the same tool
@@ -728,7 +737,7 @@ class OpenAIClient(BaseLLMClient):
                 )
                 logger.warning(
                     "%s %s on attempt %d/%d — retry in %.1fs",
-                    self.PROVIDER, r.status_code, attempt + 1, self._max_retries + 1, delay,
+                    self.PROVIDER, r.status_code, attempt + 1, self._retry_limit(self._max_retries) + 1, delay,
                 )
                 await asyncio.sleep(delay)
                 continue
@@ -755,7 +764,8 @@ class OpenAIClient(BaseLLMClient):
                     temp_body = {**body, "temperature": 1.0}
                     try:
                         r_t = await self._ensure_http().post(
-                            self.URL, headers=headers, json=temp_body
+                            self.URL, headers=headers, json=temp_body,
+                            **self._timeout_kw(),
                         )
                     except (httpx.TimeoutException, httpx.ConnectError,
                             httpx.ReadError, httpx.NetworkError,
@@ -793,7 +803,8 @@ class OpenAIClient(BaseLLMClient):
                     fallback_body = {**body, "reasoning": {"exclude": True}}
                     try:
                         r2 = await self._ensure_http().post(
-                            self.URL, headers=headers, json=fallback_body
+                            self.URL, headers=headers, json=fallback_body,
+                            **self._timeout_kw(),
                         )
                     except (httpx.TimeoutException, httpx.ConnectError,
                             httpx.ReadError, httpx.NetworkError,
@@ -832,7 +843,8 @@ class OpenAIClient(BaseLLMClient):
                                 if k not in VENDOR_BODY_KEYS}
                     try:
                         r_v = await self._ensure_http().post(
-                            self.URL, headers=headers, json=stripped
+                            self.URL, headers=headers, json=stripped,
+                            **self._timeout_kw(),
                         )
                     except (httpx.TimeoutException, httpx.ConnectError,
                             httpx.ReadError, httpx.NetworkError,
@@ -881,12 +893,12 @@ class OpenAIClient(BaseLLMClient):
                     _err_code = int(_raw_code)  # Accept both integer codes and digit strings.
                 except (TypeError, ValueError):
                     _err_code = None
-                if _err_code in RETRYABLE_STATUS and attempt < self._max_retries:
+                if _err_code in RETRYABLE_STATUS and attempt < self._retry_limit(self._max_retries):
                     delay = backoff_with_jitter(self._retry_backoff_s, attempt)
                     logger.warning(
                         "%s body-level error code=%s on attempt %d/%d — retry in %.1fs",
                         self.PROVIDER, _err_code, attempt + 1,
-                        self._max_retries + 1, delay,
+                        self._retry_limit(self._max_retries) + 1, delay,
                     )
                     await asyncio.sleep(delay)
                     continue
@@ -926,13 +938,13 @@ class OpenAIClient(BaseLLMClient):
                     self.PROVIDER, comp_toks,
                 )
                 return data
-            if empty_content and not has_call and attempt < self._max_retries:
+            if empty_content and not has_call and attempt < self._retry_limit(self._max_retries):
                 logger.warning(
                     "%s empty content (200, completion_tokens=%s) on attempt "
                     "%d/%d — retry",
                     self.PROVIDER,
                     (data.get("usage") or {}).get("completion_tokens"),
-                    attempt + 1, self._max_retries + 1,
+                    attempt + 1, self._retry_limit(self._max_retries) + 1,
                 )
                 # Jitter empty-response retries too, avoiding synchronized load from reasoning
                 # models under pressure.
@@ -967,6 +979,12 @@ class OpenAIClient(BaseLLMClient):
         the endpoint. ``tiktoken_encoding`` on the client wins over the model
         name. Without it, the model must be one tiktoken knows.
         """
+        async with self._observe("count_tokens", model=model):
+            return await self._count_tokens_impl(texts, model=model)
+
+    async def _count_tokens_impl(
+        self, texts: list[str], *, model: str | None = None,
+    ) -> list[int]:
         if not texts:
             return []
         from llm_mesh.openai.tokenize import count_text_tokens, encoding_name
@@ -1070,13 +1088,15 @@ class OpenAIClient(BaseLLMClient):
     ) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self._key}", **self._extra_headers}
         last_exc: Exception | None = None
-        for attempt in range(self._max_retries + 1):
+        for attempt in range(self._retry_limit(self._max_retries) + 1):
             try:
-                response = await self._ensure_http().post(url, headers=headers, json=body)
+                response = await self._ensure_http().post(
+                    url, headers=headers, json=body, **self._timeout_kw(),
+                )
             except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError,
                     httpx.NetworkError, httpx.RemoteProtocolError) as exc:
                 last_exc = exc
-                if attempt == self._max_retries:
+                if attempt == self._retry_limit(self._max_retries):
                     err_cls = LLMTimeoutError if isinstance(exc, httpx.TimeoutException) else OpenAIError
                     raise err_cls(
                         f"{self.PROVIDER} {what} network error after "
@@ -1093,7 +1113,7 @@ class OpenAIClient(BaseLLMClient):
                 raise LLMAuthError(
                     f"{self.PROVIDER} {what}: authentication error — {response.text[:300]}"
                 )
-            if response.status_code in RETRYABLE_STATUS and attempt < self._max_retries:
+            if response.status_code in RETRYABLE_STATUS and attempt < self._retry_limit(self._max_retries):
                 await asyncio.sleep(backoff_with_jitter(self._retry_backoff_s, attempt))
                 continue
             raise OpenAIError(
@@ -1107,6 +1127,12 @@ class OpenAIClient(BaseLLMClient):
         """Generate plain text without tools. Return message.content as LLMResponse.text with empty
         arguments; callers may parse structured text themselves.
         """
+        async with self._observe("generate_text", request) as observed:
+            response = await self._generate_text_impl(request)
+            observed.note(response)
+            return response
+
+    async def _generate_text_impl(self, request: LLMRequest) -> LLMResponse:
         request = self._guarded_request(request)
         body: dict[str, Any] = {
             "model": self._effective_model(request),
@@ -1162,6 +1188,19 @@ class OpenAIClient(BaseLLMClient):
         """Stream plain text from OpenAI SSE content deltas until [DONE]. Use generate_structured
         for function-calling output.
         """
+        async with self._observe("generate_stream", request) as observed:
+            impl = self._generate_stream_impl(request)
+            async with self._close_agen(impl):
+                while True:
+                    try:
+                        chunk = await anext(impl)
+                    except StopAsyncIteration:
+                        break
+                    yield observed.note(chunk)
+
+    async def _generate_stream_impl(
+        self, request: LLMRequest
+    ) -> AsyncIterator[LLMStreamChunk]:
         request = self._guarded_request(request)
         body: dict[str, Any] = {
             "model": self._effective_model(request),
@@ -1193,7 +1232,8 @@ class OpenAIClient(BaseLLMClient):
         retry_without_usage = False
         try:
             async with self._ensure_http().stream(
-                "POST", self.URL, headers=headers, json=body
+                "POST", self.URL, headers=headers, json=body,
+                **self._timeout_kw(),
             ) as r:
                 if r.status_code >= 400:
                     raw = (await r.aread()).decode("utf-8", "replace")[:300]
@@ -1503,8 +1543,45 @@ class OpenAIClient(BaseLLMClient):
             **self._reasoning_body_kwargs(request),
         }
 
+    async def _reask_on_schema(
+        self,
+        request: LLMRequest,
+        result: LLMResponse,
+        schema: dict[str, Any] | None,
+        fn: str,
+        reasked: list[bool],
+        resend: Any,
+    ) -> LLMResponse:
+        """One corrective retry on a confirmed schema violation.
+
+        ``resend`` posts a body built from the augmented request and returns
+        the provider payload. The caller still accepts, raises, or falls
+        back using the result of this method. A second failure is not
+        retried. ``no_degrade`` and ``preserve`` skip the retry so a
+        measurement sees the first response.
+        """
+        if reasked and reasked[0]:
+            return result
+        if not self._validation_reask_allowed():
+            return result
+        detail = schema_violation_detail(result.arguments, schema)
+        if detail is None:
+            return result
+        if reasked:
+            reasked[0] = True
+        follow = corrective_request(
+            request,
+            function_name=fn,
+            failed_answer=json.dumps(result.arguments, ensure_ascii=False),
+            detail=detail,
+        )
+        data = await resend(follow)
+        second = self._structured_response(data, follow)
+        return stamp_validation_reask(result.usage, second)
+
     async def _serve_response_format_tier(
         self, request: LLMRequest, fn: str, *, reason: str,
+        reasked: list[bool] | None = None,
     ) -> LLMResponse:
         """Serve structured output through the declared response_format dialect. Parse
         message.content and still validate required schema fields before considering the tier
@@ -1520,7 +1597,15 @@ class OpenAIClient(BaseLLMClient):
             self._response_format_body(request, fn)
         )
         result = self._structured_response(data, request)
+        result = await self._reask_on_schema(
+            request, result, request.schema_, fn, reasked,
+            lambda follow: self._post_with_length_retry(
+                self._response_format_body(follow, fn)
+            ),
+        )
         if self._validate_schema and not _args_satisfy_schema(result.arguments, request.schema_):
+            if result.validation_reasks:
+                note_active_usage(result.usage)
             raise LLMValidationError(
                 f"response response_format={self._response_format} does not conform to "
                 f"the function schema '{fn}'"
@@ -1539,7 +1624,19 @@ class OpenAIClient(BaseLLMClient):
         or single-function forms as appropriate, then declared response_format and permitted
         text emulation. Preserve explicit mode selection, no-degrade measurements, schema
         validation, and the tier that actually served the response.
+
+        A confirmed schema violation is sent back once, on the same tier,
+        when validation is on and neither ``no_degrade`` nor
+        ``fallback_policy="preserve"`` is set. Those modes keep the first
+        response. The second result, if it still fails, takes the existing
+        raise or tier fallback.
         """
+        async with self._observe("generate_structured", request) as observed:
+            response = await self._generate_structured_impl(request)
+            observed.note(response)
+            return response
+
+    async def _generate_structured_impl(self, request: LLMRequest) -> LLMResponse:
         request = self._guarded_request(request)
         # In multi-tool mode, let the model choose from request.tools. If it instead ignores
         # tools and emits JSON content, learn that behavior and fall back to the forced
@@ -1735,11 +1832,13 @@ class OpenAIClient(BaseLLMClient):
         if self._tool_choice_pref in order:
             order = order[order.index(self._tool_choice_pref):]
 
+        reasked = [False]
         for idx, mode in enumerate(order):
             if mode == "response_format":
                 try:
                     return await self._serve_response_format_tier(
                         request, fn, reason="fallback from tool tiers",
+                        reasked=reasked,
                     )
                 except (OpenAIError, LLMValidationError) as exc:
                     if self._preserve_responses:
@@ -1837,10 +1936,19 @@ class OpenAIClient(BaseLLMClient):
                 raise  # Propagate substantive errors to the caller.
             try:
                 result = self._structured_response(data, request)
+                result = await self._reask_on_schema(
+                    request, result, request.schema_, fn, reasked,
+                    lambda follow: self._post_with_length_retry(
+                        self._fc_body(follow, fn, schema, tool_choice)
+                    ),
+                )
                 if self._validate_schema and not _args_satisfy_schema(result.arguments, request.schema_):
                     # Parsed JSON may still violate the function schema. Follow the same
                     # fallback path as unparseable output instead of returning invalid arguments
-                    # as a successful response.
+                    # as a successful response. A re-ask, when one ran, already replaced
+                    # ``result`` with the second attempt.
+                    if result.validation_reasks:
+                        note_active_usage(result.usage)
                     raise LLMValidationError(
                         f"structured args do not conform to the function schema "
                         f"'{fn}' (tool_choice={mode})"
@@ -2254,6 +2362,19 @@ class OpenAIClient(BaseLLMClient):
         transport exceptions so consumers can observe stream interruption. Request construction
         follows the text streaming path.
         """
+        async with self._observe("generate_stream_events", request) as observed:
+            impl = self._generate_stream_events_impl(request)
+            async with self._close_agen(impl):
+                while True:
+                    try:
+                        event = await anext(impl)
+                    except StopAsyncIteration:
+                        break
+                    yield observed.note(event)
+
+    async def _generate_stream_events_impl(
+        self, request: LLMRequest
+    ) -> AsyncIterator[StreamEvent]:
         request = self._guarded_request(request)
         body: dict[str, Any] = {
             "model": self._effective_model(request),
@@ -2290,7 +2411,8 @@ class OpenAIClient(BaseLLMClient):
         retry_without_usage = False
         try:
             async with self._ensure_http().stream(
-                "POST", self.URL, headers=headers, json=body
+                "POST", self.URL, headers=headers, json=body,
+                **self._timeout_kw(),
             ) as r:
                 if r.status_code >= 400:
                     raw = (await r.aread()).decode("utf-8", "replace")[:300]

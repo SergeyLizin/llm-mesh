@@ -23,7 +23,10 @@ from .client import (
 )
 from ._common import simplify_schema_for_gigachat, split_reasoning_content
 from llm_mesh._common import _env_flag, finish_reason_opt
+from llm_mesh.base import BudgetLedger
 from llm_mesh.types import (
+    Budget,
+    BudgetState,
     LLMAuthError,
     LLMError,
     LLMRequest,
@@ -73,6 +76,7 @@ class GigaChatBatchClient:
         max_wait_s: float | None = None,
         http_retries: int | None = None,
         backoff_start_s: float | None = None,
+        budget: Budget | None = None,
     ) -> None:
         if auth is None and token is None:
             raise LLMAuthError(
@@ -104,6 +108,13 @@ class GigaChatBatchClient:
             if backoff_start_s is not None
             else _env_float("LLM_BATCH_429_BACKOFF_START", 1.0)
         )
+        self._budget_ledger = BudgetLedger(budget)
+
+    def reset_budget(self) -> None:
+        self._budget_ledger.reset()
+
+    def budget_state(self) -> BudgetState:
+        return self._budget_ledger.state()
 
     # --- auth / transport ----------------------------------------------
 
@@ -283,6 +294,12 @@ class GigaChatBatchClient:
     # High-level chat batching.
 
     def _build_chat_line(self, sub_id: str, request: LLMRequest, model: str) -> dict[str, Any]:
+        # This line is text only. Building it from a request that carries
+        # images would drop them and return a successful text result.
+        if request.images:
+            raise LLMValidationError(
+                "GigaChat: legacy functions chat has no image input"
+            )
         messages = [
             {"role": "system", "content": request.system},
             {"role": "user", "content": request.user},
@@ -374,14 +391,30 @@ class GigaChatBatchClient:
         if not requests:
             return []
 
+        provider = getattr(self._auth, "PROVIDER", None) or "gigachat"
+        self._budget_ledger.check(provider)
         from llm_mesh.hooks import guard_batch_requests
 
-        provider = getattr(self._auth, "PROVIDER", None) or "gigachat"
         accepted, blocked = guard_batch_requests(
             requests, provider=provider, return_exceptions=return_exceptions,
         )
+        # Image rows stay out of the file. With return_exceptions they occupy
+        # their index; otherwise the batch fails before upload.
+        errors: dict[int, BaseException] = dict(blocked)
+        kept: list[tuple[int, LLMRequest]] = []
+        for index, req in accepted:
+            if req.images:
+                exc = LLMValidationError(
+                    "GigaChat: legacy functions chat has no image input"
+                )
+                if not return_exceptions:
+                    raise exc
+                errors[index] = exc
+            else:
+                kept.append((index, req))
+        accepted = kept
         if not accepted:
-            return [blocked[i] for i in range(len(requests))]
+            return [errors[i] for i in range(len(requests))]
 
         resolved_model = model or (self._auth.model if self._auth is not None else "GigaChat")
         # A line may name its own model. The batch default covers the rest.
@@ -407,8 +440,8 @@ class GigaChatBatchClient:
         by_id: dict[str, dict[str, Any]] = {str(r.get("id")): r for r in raw_results}
         out: list[LLMResponse | BaseException] = []
         for i, _req in enumerate(requests):
-            if i in blocked:
-                out.append(blocked[i])
+            if i in errors:
+                out.append(errors[i])
                 continue
             req = guarded[i]
             entry = by_id.get(str(i))
@@ -435,6 +468,7 @@ class GigaChatBatchClient:
                 out.append(err)
             else:
                 assert response is not None
+                self._budget_ledger.add(response.usage)
                 out.append(response)
         return out
 
@@ -459,6 +493,7 @@ class BatchingLLMClient:
         max_batch_size: int | None = None,
         max_delay_s: float | None = None,
         idle_timeout_s: float = 30.0,
+        budget: Budget | None = None,
     ) -> None:
         self._batch = batch_client
         self._model = model
@@ -473,6 +508,13 @@ class BatchingLLMClient:
         # Every future handed to a caller. ``aclose`` fails the ones still waiting,
         # including items sitting in the queue or in a worker-local batch.
         self._pending: set[asyncio.Future] = set()
+        self._budget_ledger = BudgetLedger(budget)
+
+    def reset_budget(self) -> None:
+        self._budget_ledger.reset()
+
+    def budget_state(self) -> BudgetState:
+        return self._budget_ledger.state()
 
     # Duck-typed client interface used by callers.
 
@@ -499,8 +541,11 @@ class BatchingLLMClient:
         return type(self).__name__
 
     async def generate_text(self, request: LLMRequest) -> LLMResponse:
+        self._budget_ledger.check(self._guard_provider())
         request = self._guarded_request(request)
-        return await self._submit(request.model_copy(update={"mode": "text"}))
+        response = await self._submit(request.model_copy(update={"mode": "text"}))
+        self._budget_ledger.add(response.usage)
+        return response
 
     async def count_tokens(
         self, texts: list[str], *, model: str | None = None,
@@ -521,13 +566,16 @@ class BatchingLLMClient:
         # Reject tools_required explicitly. The legacy batch functions API cannot implement a
         # native tool loop; silently forcing function_name could be mistaken for a
         # model-selected final answer without any tool execution.
+        self._budget_ledger.check(self._guard_provider())
         request = self._guarded_request(request)
         if request.tools_required:
             raise LLMValidationError(
                 "Batch: native tool-loop (tools_required) is not supported — "
                 "the batch body is one forced function call, with no tool role"
             )
-        return await self._submit(request.model_copy(update={"mode": "function_call"}))
+        response = await self._submit(request.model_copy(update={"mode": "function_call"}))
+        self._budget_ledger.add(response.usage)
+        return response
 
     async def aclose(self) -> None:
         # CancelledError subclasses BaseException, so a cancelled ``_process`` never

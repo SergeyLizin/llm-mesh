@@ -265,7 +265,7 @@ OpenAI batch lines follow the official Batch API (`purpose=batch`, `completion_w
 
 ## Canary
 
-`set_canary_context_token` appends a marker to the system prompt and scans replies for it. Reset the token in a `finally` block.
+`set_canary_context_token` appends a marker to the system prompt and scans reply text for it. Image bytes are not scanned. Reset the token in a `finally` block.
 
 ```python
 from llm_mesh.canary import reset_canary_context_token, set_canary_context_token
@@ -294,7 +294,52 @@ Batch results are not scanned. A custom prompt or detector can replace the defau
 
 `count_tokens` is not guarded. It takes raw strings and is a diagnostic. A connectivity probe that calls `generate_text` is guarded like any other request, so a refusal shows up as that route check's `error_type`.
 
-The hook is process-wide: one function for every client and thread. A hook that needs per-session isolation has to do that itself.
+The hook is process-wide: one function for every client and thread. A hook that needs per-session isolation has to do that itself. A blocked request logs `REQUEST_BLOCKED` and the provider name. The payload is not logged, and neither are image bytes.
+
+## Metrics
+
+`configure_metrics_hook` receives one `CallRecord` per interactive call: `generate_text`, `generate_structured`, `generate_stream`, `generate_stream_events`, and `count_tokens`. The record is emitted on success, on a provider error, on a guard refusal (`error_type="LLMRequestBlocked"`), and when a stream ends or is interrupted. `latency_ms` covers the whole call, including retries and a validation re-ask. The default hook is a no-op.
+
+The callable is synchronous. It must not block or await. An exception it raises is logged at WARNING with the marker `METRICS_HOOK_FAILED` and is swallowed, so telemetry cannot fail the call.
+
+Batch clients are not instrumented. A batch submission does not emit a `CallRecord`.
+
+## Budgets
+
+Pass `budget=Budget(...)` to a client. `max_cost_usd`, `max_cost_rub`, and `max_total_tokens` are independent ceilings. A client that is already at a ceiling raises `LLMBudgetExceeded` before the next request is sent. Spend is added after each response, including the terminal chunk of a stream, from the same usage the metrics record carries. `reset_budget()` zeroes the counters. `budget_state()` returns a copy of what has been accumulated.
+
+Currencies are not converted. A ceiling in dollars does not account ruble spend, and the reverse is also true. A route that reports both needs both fields. Unreported cost is not added. `total_tokens` is.
+
+`LLMBudgetExceeded` is not a validation error. Tier ladders do not retry it.
+
+Batch clients take the same constructor argument. The check runs before upload, and each returned response is accumulated. The coalescing adapter checks before it submits and adds the response it gets back.
+
+## Validation re-ask
+
+When structured output fails jsonschema and `validate_schema` is on, the client retries once. The retry is the same request plus two history turns: the failed answer as the assistant, then a user turn that names the function and the first schema error. Body builders are unchanged. If the second answer still fails, the existing path runs: raise, or fall through to the next tier, using that second result.
+
+The re-ask does not run when `no_degrade` is set or `fallback_policy="preserve"`. Those modes are for measurement, and they have to see the raw first response. GigaChat does not validate arguments, so it does not re-ask.
+
+Usage of the two attempts is added. Cache fields keep the attempt that reported them, preferring the second. `LLMResponse.validation_reasks` is `1` when a re-ask happened. The metrics record carries the summed usage and the tier that served the call.
+
+## Per-call timeout and retries
+
+`LLMRequest.timeout_s` and `LLMRequest.max_retries` override the constructor, which overrides the environment. A negative value raises `LLMValidationError` before any HTTP. `timeout_s` is passed to httpx as that request's timeout. GigaChat keeps its connect timeout of 30 seconds and applies `timeout_s` to the other phases. `max_retries=0` is one attempt.
+
+Batch clients and `count_tokens` stay on the constructor timeout. They honor a per-call timeout only where the underlying method already accepts one.
+
+## Images
+
+`LLMRequest.images` attaches images to the current user turn. History turns stay text. An empty list is the text-only body, byte for byte.
+
+| Client | `data` | `url` |
+| --- | --- | --- |
+| OpenAI | `data:` URL in an `image_url` part | `image_url` part |
+| Anthropic | base64 `source` (`anthropic-version` `2023-06-01` accepts it) | `source` type `url` on that same version |
+| Gemini | `inlineData` part (`mimeType`, camelCase like the rest of the body) | rejected: generateContent has no public-URL image input |
+| GigaChat | rejected: legacy functions chat has no image input | rejected |
+
+`media_type` defaults to `image/png` for bytes and must be png, jpeg, gif, or webp. The canary scans text only. The request guard sees the attachments and may refuse them. Metrics records are unchanged.
 
 ## Adding a provider
 

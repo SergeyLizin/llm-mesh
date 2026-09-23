@@ -9,7 +9,7 @@ from typing import Any, TypeVar
 
 from llm_mesh.config import get_env
 from llm_mesh.text_parsing import looks_degenerate_repetition
-from llm_mesh.types import LLMRequest
+from llm_mesh.types import LLMRequest, LLMResponse, LLMUsage
 from .hooks import (
     build_canary_prompt,
     check_and_warn,
@@ -33,6 +33,31 @@ def check_response_canary(response_text: str, *, context: str) -> None:
     check_and_warn(response_text, token, session_id="", context=context)
 
 
+def schema_violation_detail(arguments: Any, schema: dict[str, Any] | None) -> str | None:
+    """First confirmed jsonschema error, or None when the arguments may pass.
+
+    A missing schema, non-object arguments, a missing jsonschema package, or
+    an unsupported schema are not confirmed violations. Only
+    ``jsonschema.ValidationError`` is. The text is the error message plus
+    the path, which a corrective re-ask feeds back to the model.
+    """
+    if not schema or not isinstance(arguments, dict):
+        return None
+    try:
+        import jsonschema  # noqa: PLC0415 -- import the validator lazily
+    except Exception:
+        return None
+    try:
+        jsonschema.validate(instance=arguments, schema=schema)
+        return None
+    except jsonschema.ValidationError as exc:
+        path = "/".join(str(part) for part in exc.absolute_path)
+        where = f"/{path}" if path else "/"
+        return f"{exc.message} at {where}"
+    except Exception:
+        return None
+
+
 def _args_satisfy_schema(arguments: Any, schema: dict[str, Any] | None) -> bool:
     """Check parsed arguments against a JSON Schema.
 
@@ -41,19 +66,74 @@ def _args_satisfy_schema(arguments: Any, schema: dict[str, Any] | None) -> bool:
     package, or an unsupported schema do not block the response: only a
     confirmed ``jsonschema.ValidationError`` returns False.
     """
-    if not schema or not isinstance(arguments, dict):
-        return True
-    try:
-        import jsonschema  # noqa: PLC0415 -- import the validator lazily
-    except Exception:
-        return True
-    try:
-        jsonschema.validate(instance=arguments, schema=schema)
-        return True
-    except jsonschema.ValidationError:
-        return False
-    except Exception:
-        return True
+    return schema_violation_detail(arguments, schema) is None
+
+
+def corrective_request(
+    request: LLMRequest,
+    *,
+    function_name: str,
+    failed_answer: str,
+    detail: str,
+) -> LLMRequest:
+    """Copy the request with one corrective turn appended to history.
+
+    Body builders already emit history and then the current user turn, so
+    the failed answer and the error text ride along without a special body.
+    The original user text stays on the request.
+    """
+    history = list(request.history or [])
+    history.append({"role": "assistant", "content": failed_answer})
+    history.append({
+        "role": "user",
+        "content": (
+            f"Your previous answer for function {function_name} failed "
+            f"schema validation: {detail}. Respond again with corrected output only."
+        ),
+    })
+    return request.model_copy(update={"history": history})
+
+
+def merge_usage(first: LLMUsage | None, second: LLMUsage | None) -> LLMUsage:
+    """Add two attempts' token counts.
+
+    Prompt, completion, total, and reasoning add. Cache fields keep the
+    attempt that reported them, and the second attempt wins when both did:
+    -1 means unreported, not an empty cache. Money adds when either side
+    reported it. None plus None stays None, so an unreported cost is not
+    treated as zero.
+    """
+    left = first or LLMUsage()
+    right = second or LLMUsage()
+
+    def _cache(left_value: int, right_value: int) -> int:
+        if right_value != -1:
+            return right_value
+        return left_value
+
+    def _money(left_value: float | None, right_value: float | None) -> float | None:
+        if left_value is None and right_value is None:
+            return None
+        return (left_value or 0.0) + (right_value or 0.0)
+
+    return LLMUsage(
+        prompt_tokens=left.prompt_tokens + right.prompt_tokens,
+        completion_tokens=left.completion_tokens + right.completion_tokens,
+        total_tokens=left.total_tokens + right.total_tokens,
+        reasoning_tokens=left.reasoning_tokens + right.reasoning_tokens,
+        cache_hit_tokens=_cache(left.cache_hit_tokens, right.cache_hit_tokens),
+        cache_miss_tokens=_cache(left.cache_miss_tokens, right.cache_miss_tokens),
+        cost_rub=_money(left.cost_rub, right.cost_rub),
+        cost_usd=_money(left.cost_usd, right.cost_usd),
+    )
+
+
+def stamp_validation_reask(prior: LLMUsage, response: LLMResponse) -> LLMResponse:
+    """Return the second attempt with both attempts' usage and reask=1."""
+    return response.model_copy(update={
+        "usage": merge_usage(prior, response.usage),
+        "validation_reasks": 1,
+    })
 
 
 def build_text_messages(
@@ -89,7 +169,19 @@ def build_text_messages(
             })
         elif role in ("user", "assistant"):
             messages.append({"role": role, "content": str(turn.get("content", ""))})
-    messages.append({"role": "user", "content": request.user})
+    # Images ride on the current user turn only. An empty list keeps the
+    # string content, so a text-only body stays byte-for-byte the same.
+    if request.images:
+        parts: list[dict[str, Any]] = [
+            {"type": "text", "text": request.user},
+            *[
+                {"type": "image_url", "image_url": {"url": image.openai_url()}}
+                for image in request.images
+            ],
+        ]
+        messages.append({"role": "user", "content": parts})
+    else:
+        messages.append({"role": "user", "content": request.user})
     return messages
 
 

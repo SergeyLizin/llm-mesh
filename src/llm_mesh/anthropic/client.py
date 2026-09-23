@@ -28,9 +28,13 @@ from llm_mesh._common import (
     _parse_json_dict_env,
     _args_satisfy_schema,
     apply_canary,
+    corrective_request,
+    schema_violation_detail,
+    merge_usage,
+    stamp_validation_reask,
     warn_if_truncated,
 )
-from llm_mesh.base import BaseLLMClient, Capability
+from llm_mesh.base import BaseLLMClient, Capability, note_active_usage
 from llm_mesh._retry import (
     RETRYABLE_SERVER_STATUS,
     backoff_with_jitter,
@@ -51,6 +55,7 @@ from llm_mesh.stream_events import (
 )
 from llm_mesh.text_parsing import extract_json_from_text, looks_degenerate_repetition
 from llm_mesh.types import (
+    Budget,
     LLMAuthError,
     LLMError,
     LLMRequest,
@@ -372,7 +377,14 @@ def build_messages(
     user = request.user
     if user_suffix:
         user = f"{user}\n\n{user_suffix}" if user else user_suffix
-    if user or not messages or messages[-1]["role"] != "user":
+    if request.images:
+        # Current user turn only. History is already flushed above.
+        blocks: list[dict[str, Any]] = []
+        if user:
+            blocks.append({"type": "text", "text": user})
+        blocks.extend(image.anthropic_block() for image in request.images)
+        append("user", blocks)
+    elif user or not messages or messages[-1]["role"] != "user":
         append("user", user)
     return system, messages
 
@@ -422,6 +434,7 @@ class AnthropicClient(BaseLLMClient):
         validate_schema: bool = True,
         fallback_policy: Literal["recover", "preserve"] = "recover",
         length_retry_cap: int = 32768,
+        budget: Budget | None = None,
     ) -> None:
         if fallback_policy not in ("recover", "preserve"):
             raise ValueError("fallback_policy must be 'recover' or 'preserve'")
@@ -496,6 +509,7 @@ class AnthropicClient(BaseLLMClient):
         )
         self._client: httpx.AsyncClient | None = None
         self._last_served_tier: str | None = None
+        self._bind_budget(budget)
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -686,15 +700,16 @@ class AnthropicClient(BaseLLMClient):
         headers = self._headers()
         sent = int(body.get("max_tokens") or 0)
         last_exc: Exception | None = None
-        for attempt in range(self._max_retries + 1):
+        for attempt in range(self._retry_limit(self._max_retries) + 1):
             try:
                 response = await self._ensure_http().post(
                     url or self.URL, headers=headers, json=body,
+                    **self._timeout_kw(),
                 )
             except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError,
                     httpx.NetworkError, httpx.RemoteProtocolError) as exc:
                 last_exc = exc
-                if attempt == self._max_retries:
+                if attempt == self._retry_limit(self._max_retries):
                     err_cls = (
                         LLMTimeoutError
                         if isinstance(exc, httpx.TimeoutException)
@@ -707,7 +722,7 @@ class AnthropicClient(BaseLLMClient):
                 await asyncio.sleep(backoff_with_jitter(self._retry_backoff_s, attempt))
                 continue
 
-            if response.status_code in _RETRYABLE_STATUS and attempt < self._max_retries:
+            if response.status_code in _RETRYABLE_STATUS and attempt < self._retry_limit(self._max_retries):
                 delay = (
                     retry_after_delay(response, self._retry_backoff_s, attempt)
                     if response.status_code == 429
@@ -716,7 +731,7 @@ class AnthropicClient(BaseLLMClient):
                 logger.warning(
                     "%s %s on attempt %d/%d — retry in %.1fs",
                     self.PROVIDER, response.status_code, attempt + 1,
-                    self._max_retries + 1, delay,
+                    self._retry_limit(self._max_retries) + 1, delay,
                 )
                 await asyncio.sleep(delay)
                 continue
@@ -763,11 +778,11 @@ class AnthropicClient(BaseLLMClient):
                 self.PROVIDER, reason,
             )
             return False
-        if attempt >= self._max_retries:
+        if attempt >= self._retry_limit(self._max_retries):
             return False
         logger.warning(
             "%s empty content on attempt %d/%d — retry",
-            self.PROVIDER, attempt + 1, self._max_retries + 1,
+            self.PROVIDER, attempt + 1, self._retry_limit(self._max_retries) + 1,
         )
         return True
 
@@ -780,6 +795,12 @@ class AnthropicClient(BaseLLMClient):
         each string is its own user message. An empty list does not call
         the API.
         """
+        async with self._observe("count_tokens", model=model):
+            return await self._count_tokens_impl(texts, model=model)
+
+    async def _count_tokens_impl(
+        self, texts: list[str], *, model: str | None = None,
+    ) -> list[int]:
         if not texts:
             return []
         chosen = model or self._model
@@ -862,6 +883,12 @@ class AnthropicClient(BaseLLMClient):
 
     async def generate_text(self, request: LLMRequest) -> LLMResponse:
         """Generate plain text. Thinking, when enabled, is returned separately."""
+        async with self._observe("generate_text", request) as observed:
+            response = await self._generate_text_impl(request)
+            observed.note(response)
+            return response
+
+    async def _generate_text_impl(self, request: LLMRequest) -> LLMResponse:
         request = self._guarded_request(request)
         self._last_served_tier = "text"
         body = self._base_body(request)
@@ -878,6 +905,12 @@ class AnthropicClient(BaseLLMClient):
         forced tool choice. ``tools`` lets the model select, with ``any`` when
         a tool call is required. ``tools_required`` never falls back to text.
         """
+        async with self._observe("generate_structured", request) as observed:
+            response = await self._generate_structured_impl(request)
+            observed.note(response)
+            return response
+
+    async def _generate_structured_impl(self, request: LLMRequest) -> LLMResponse:
         request = self._guarded_request(request)
         if request.mode == "text" or self._tool_choice_pref == "text":
             return await self.generate_text(request)
@@ -916,14 +949,23 @@ class AnthropicClient(BaseLLMClient):
             )
             return await self._emulate_json(request)
         self._last_served_tier = "json_schema"
-        return self._structured_from_text(payload, request, schema)
+        return await self._finish_structured_text(
+            payload, request, schema,
+            resend=lambda follow: self._send_json_schema(follow, schema),
+        )
+
+    def _forced_tool_body(
+        self, request: LLMRequest, schema: dict[str, Any], name: str,
+    ) -> dict[str, Any]:
+        body = self._base_body(request, tools=True)
+        body["tools"] = [_tool_def(name, request.function_description, schema)]
+        body["tool_choice"] = {"type": "tool", "name": name}
+        return body
 
     async def _generate_forced_tool(self, request: LLMRequest) -> LLMResponse:
         name = request.function_name or "build_artifact"
         schema = request.schema_ or {"type": "object"}
-        body = self._base_body(request, tools=True)
-        body["tools"] = [_tool_def(name, request.function_description, schema)]
-        body["tool_choice"] = {"type": "tool", "name": name}
+        body = self._forced_tool_body(request, schema, name)
         return await self._complete_tool_request(body, request, schema, forced=name)
 
     async def _generate_tools(self, request: LLMRequest) -> LLMResponse:
@@ -979,21 +1021,72 @@ class AnthropicClient(BaseLLMClient):
             return self._response(payload, request=request)
         self._last_served_tier = "tool"
         chosen = calls[0]
-        if schema is not None and not self._accept_arguments(chosen["arguments"], schema, request):
-            return await self._emulate_json(request)
+        prior_usage = None
+        if schema is not None and self._validation_reask_allowed():
+            detail = schema_violation_detail(chosen["arguments"], schema)
+            if detail:
+                # Same forced-tool body, with the failure appended to history.
+                # The second result is what _accept_arguments then raises or
+                # falls back from. A text fallback after this does not re-ask.
+                name = str(chosen["name"] or forced or request.function_name)
+                follow = corrective_request(
+                    request,
+                    function_name=name,
+                    failed_answer=json.dumps(chosen["arguments"], ensure_ascii=False),
+                    detail=detail,
+                )
+                prior_usage = self._usage(payload)
+                payload = await self._send_tool_body(
+                    self._forced_tool_body(follow, schema, name), follow,
+                )
+                calls = tool_calls_of(payload)
+                self._warn_truncated(payload, follow)
+                if not calls:
+                    if request.tools_required or forced or self._tool_choice_pref == "required":
+                        note_active_usage(merge_usage(prior_usage, self._usage(payload)))
+                        raise LLMValidationError(
+                            f"{self.PROVIDER}: response did not include a tool_use block "
+                            f"(stop_reason={payload.get('stop_reason')!r})",
+                            payload=payload,
+                        )
+                    self._last_served_tier = "text"
+                    return stamp_validation_reask(prior_usage, self._response(payload, request=follow))
+                chosen = calls[0]
+                request = follow
+        if (
+            schema is not None
+            and self._validate_schema
+            and not _args_satisfy_schema(chosen["arguments"], schema)
+        ):
+            merged = (
+                merge_usage(prior_usage, self._usage(payload))
+                if prior_usage is not None else None
+            )
+            if merged is not None:
+                note_active_usage(merged)
+            if not self._accept_arguments(chosen["arguments"], schema, request):
+                fallback = await self._emulate_json(
+                    request, allow_reask=prior_usage is None,
+                )
+                if merged is None:
+                    return fallback
+                return stamp_validation_reask(merged, fallback)
         text = text_of(payload)
         self._check_response_canary(text, context="generate_structured.text")
         self._check_response_canary(
             json.dumps(chosen["arguments"], ensure_ascii=False, default=str),
             context="generate_structured.args",
         )
-        return self._response(
+        response = self._response(
             payload,
             arguments=chosen["arguments"],
             function_name=str(chosen["name"] or forced or ""),
             tool_calls=calls,
             request=request,
         )
+        if prior_usage is not None:
+            return stamp_validation_reask(prior_usage, response)
+        return response
 
     def _accept_arguments(
         self,
@@ -1042,7 +1135,16 @@ class AnthropicClient(BaseLLMClient):
             return False
         return bool(_STRUCTURED_REJECTED_RE.search(exc.detail or str(exc)))
 
-    async def _emulate_json(self, request: LLMRequest) -> LLMResponse:
+    async def _send_json_schema(
+        self, request: LLMRequest, schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        body = self._base_body(request)
+        body["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
+        return await self._send(body, length_retry=request.length_retry)
+
+    async def _emulate_json(
+        self, request: LLMRequest, *, allow_reask: bool = True,
+    ) -> LLMResponse:
         schema = request.schema_ or {"type": "object"}
         suffix = (
             "Respond with one JSON object and no other text. "
@@ -1051,13 +1153,61 @@ class AnthropicClient(BaseLLMClient):
         self._last_served_tier = "text"
         body = self._base_body(request, user_suffix=suffix)
         payload = await self._send(body, length_retry=request.length_retry)
-        return self._structured_from_text(payload, request, schema)
+
+        async def resend(follow: LLMRequest) -> dict[str, Any]:
+            follow_body = self._base_body(follow, user_suffix=suffix)
+            return await self._send(follow_body, length_retry=follow.length_retry)
+
+        return await self._finish_structured_text(
+            payload, request, schema,
+            resend=resend if allow_reask else None,
+        )
+
+    async def _finish_structured_text(
+        self,
+        payload: dict[str, Any],
+        request: LLMRequest,
+        schema: dict[str, Any],
+        *,
+        resend: Any,
+    ) -> LLMResponse:
+        """Parse structured text, re-ask once on a schema violation, then enforce.
+
+        ``resend`` is None when this call is already the fallback after a
+        tool re-ask, or when measurement mode must keep the first answer.
+        The tier set by the caller stays: a re-ask uses the same body.
+        """
+        response = self._structured_from_text(payload, request, schema, enforce=False)
+        if resend is not None and self._validation_reask_allowed():
+            detail = schema_violation_detail(response.arguments, schema)
+            if detail:
+                follow = corrective_request(
+                    request,
+                    function_name=request.function_name,
+                    failed_answer=json.dumps(response.arguments, ensure_ascii=False),
+                    detail=detail,
+                )
+                second_payload = await resend(follow)
+                second = self._structured_from_text(
+                    second_payload, follow, schema, enforce=False,
+                )
+                response = stamp_validation_reask(response.usage, second)
+        if self._validate_schema and not _args_satisfy_schema(response.arguments, schema):
+            if response.validation_reasks:
+                note_active_usage(response.usage)
+            raise LLMValidationError(
+                f"{self.PROVIDER}: JSON content does not satisfy the schema",
+                payload=response.raw,
+            )
+        return response
 
     def _structured_from_text(
         self,
         payload: dict[str, Any],
         request: LLMRequest,
         schema: dict[str, Any],
+        *,
+        enforce: bool = True,
     ) -> LLMResponse:
         text = text_of(payload)
         self._check_response_canary(text, context="generate_structured.text")
@@ -1073,7 +1223,7 @@ class AnthropicClient(BaseLLMClient):
                 f"{self.PROVIDER}: structured content was not a JSON object",
                 payload=payload,
             )
-        if self._validate_schema and not _args_satisfy_schema(arguments, schema):
+        if enforce and self._validate_schema and not _args_satisfy_schema(arguments, schema):
             raise LLMValidationError(
                 f"{self.PROVIDER}: JSON content does not satisfy the schema",
                 payload=arguments,
@@ -1085,6 +1235,19 @@ class AnthropicClient(BaseLLMClient):
         self, request: LLMRequest,
     ) -> AsyncIterator[LLMStreamChunk]:
         """Stream text and thinking deltas, then a terminal chunk with usage."""
+        async with self._observe("generate_stream", request) as observed:
+            impl = self._generate_stream_impl(request)
+            async with self._close_agen(impl):
+                while True:
+                    try:
+                        chunk = await anext(impl)
+                    except StopAsyncIteration:
+                        break
+                    yield observed.note(chunk)
+
+    async def _generate_stream_impl(
+        self, request: LLMRequest,
+    ) -> AsyncIterator[LLMStreamChunk]:
         request = self._guarded_request(request)
         body = self._base_body(request)
         body["stream"] = True
@@ -1157,6 +1320,19 @@ class AnthropicClient(BaseLLMClient):
         A request without tools is streamed as plain text. The canary is
         scanned on this generator, including when the caller stops early.
         """
+        async with self._observe("generate_stream_events", request) as observed:
+            impl = self._generate_stream_events_impl(request)
+            async with self._close_agen(impl):
+                while True:
+                    try:
+                        event = await anext(impl)
+                    except StopAsyncIteration:
+                        break
+                    yield observed.note(event)
+
+    async def _generate_stream_events_impl(
+        self, request: LLMRequest,
+    ) -> AsyncIterator[StreamEvent]:
         request = self._guarded_request(request)
         if request.tools:
             body = self._base_body(request, tools=True)
@@ -1272,13 +1448,14 @@ class AnthropicClient(BaseLLMClient):
         stops early, so the canary scan on the caller would be skipped.
         """
         client = self._ensure_http()
-        for attempt in range(self._max_retries + 1):
+        for attempt in range(self._retry_limit(self._max_retries) + 1):
             yielded = False
             response: httpx.Response | None = None
             try:
                 response = await client.send(
                     client.build_request(
                         "POST", self.URL, headers=self._headers(), json=body,
+                        **self._timeout_kw(),
                     ),
                     stream=True,
                 )
@@ -1316,7 +1493,7 @@ class AnthropicClient(BaseLLMClient):
                 if (
                     yielded
                     or exc.status_code not in _RETRYABLE_STATUS
-                    or attempt >= self._max_retries
+                    or attempt >= self._retry_limit(self._max_retries)
                 ):
                     raise
                 delay = (
@@ -1327,12 +1504,12 @@ class AnthropicClient(BaseLLMClient):
                 logger.warning(
                     "%s stream %s on attempt %d/%d — retry in %.1fs",
                     self.PROVIDER, exc.status_code, attempt + 1,
-                    self._max_retries + 1, delay,
+                    self._retry_limit(self._max_retries) + 1, delay,
                 )
                 await asyncio.sleep(delay)
             except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError,
                     httpx.NetworkError, httpx.RemoteProtocolError) as exc:
-                if yielded or attempt >= self._max_retries:
+                if yielded or attempt >= self._retry_limit(self._max_retries):
                     err_cls = (
                         LLMTimeoutError
                         if isinstance(exc, httpx.TimeoutException)
