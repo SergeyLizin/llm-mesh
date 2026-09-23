@@ -14,6 +14,21 @@ class LLMError(RuntimeError):
     """Base exception for LLM calls."""
 
 
+class LLMRequestBlocked(LLMError):
+    """The request hook refused the call before it reached the provider.
+
+    This is not LLMValidationError. Tier ladders, length-retry, and
+    degradation catch LLMValidationError and provider errors such as
+    OpenAIError, and may retry or fall through to another tier. A guard
+    refusal is the application's decision. It must not be recovered and must
+    not count as degradation. no_degrade and preserve do not apply.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class LLMAuthError(LLMError):
     """OAuth or bearer authentication failure, including failed token refresh."""
 

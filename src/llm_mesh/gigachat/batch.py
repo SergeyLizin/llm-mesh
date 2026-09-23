@@ -374,13 +374,26 @@ class GigaChatBatchClient:
         if not requests:
             return []
 
+        from llm_mesh.hooks import guard_batch_requests
+
+        provider = getattr(self._auth, "PROVIDER", None) or "gigachat"
+        accepted, blocked = guard_batch_requests(
+            requests, provider=provider, return_exceptions=return_exceptions,
+        )
+        if not accepted:
+            return [blocked[i] for i in range(len(requests))]
+
         resolved_model = model or (self._auth.model if self._auth is not None else "GigaChat")
         # A line may name its own model. The batch default covers the rest.
         # The Batch API accepts a different model on each JSONL line.
-        line_models = [req.model or resolved_model for req in requests]
+        # Blocked rows stay out of the file and keep their original indexes.
+        guarded = dict(accepted)
+        line_models = {
+            i: req.model or resolved_model for i, req in accepted
+        }
         lines = [
             self._build_chat_line(str(i), req, line_models[i])
-            for i, req in enumerate(requests)
+            for i, req in accepted
         ]
         jsonl = self.build_jsonl(lines)
 
@@ -393,7 +406,11 @@ class GigaChatBatchClient:
         # Match results by id, using the stringified input-request index.
         by_id: dict[str, dict[str, Any]] = {str(r.get("id")): r for r in raw_results}
         out: list[LLMResponse | BaseException] = []
-        for i, req in enumerate(requests):
+        for i, _req in enumerate(requests):
+            if i in blocked:
+                out.append(blocked[i])
+                continue
+            req = guarded[i]
             entry = by_id.get(str(i))
             err: BaseException | None = None
             response: LLMResponse | None = None
@@ -459,13 +476,52 @@ class BatchingLLMClient:
 
     # Duck-typed client interface used by callers.
 
+    def _guarded_request(self, request: LLMRequest) -> LLMRequest:
+        """Refuse or replace this call before it joins the coalesced batch.
+
+        A blocked request fails its own future at submit time. Neighbors
+        already queued are not failed with it.
+        """
+        from llm_mesh.hooks import apply_request_guard
+
+        return apply_request_guard(request, provider=self._guard_provider())
+
+    def _guard_provider(self) -> str:
+        batch = self._batch
+        for owner in (
+            batch,
+            getattr(batch, "_auth", None),
+            getattr(batch, "_openai", None),
+        ):
+            label = getattr(owner, "PROVIDER", None)
+            if isinstance(label, str) and label:
+                return label
+        return type(self).__name__
+
     async def generate_text(self, request: LLMRequest) -> LLMResponse:
+        request = self._guarded_request(request)
         return await self._submit(request.model_copy(update={"mode": "text"}))
+
+    async def count_tokens(
+        self, texts: list[str], *, model: str | None = None,
+    ) -> list[int]:
+        """Count on the wrapped completion client when it has a tokenizer.
+
+        The coalescer only batches chat calls. A budget check stays local.
+        """
+        inner = getattr(self._batch, "_openai", None)
+        count = getattr(inner, "count_tokens", None)
+        if count is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support count_tokens"
+            )
+        return await count(texts, model=model)
 
     async def generate_structured(self, request: LLMRequest) -> LLMResponse:
         # Reject tools_required explicitly. The legacy batch functions API cannot implement a
         # native tool loop; silently forcing function_name could be mistaken for a
         # model-selected final answer without any tool execution.
+        request = self._guarded_request(request)
         if request.tools_required:
             raise LLMValidationError(
                 "Batch: native tool-loop (tools_required) is not supported — "

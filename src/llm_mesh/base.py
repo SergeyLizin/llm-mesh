@@ -47,6 +47,10 @@ class Capability(str, Enum):
     JSON_SCHEMA_MODE = "json_schema_mode"
     LENGTH_RETRY = "length_retry"
     COUNT_TOKENS = "count_tokens"
+    # Dense embeddings, and sparse vectors when the provider returns them.
+    EMBEDDINGS = "embeddings"
+    # Gateway /score or /v1/rerank, or a local cross-encoder.
+    RERANK = "rerank"
     # Batch submission. Interactive clients do not declare this: GigaChat
     # batching is a separate transport, not a method of GigaChatAsyncClient.
     BATCH = "batch"
@@ -76,6 +80,15 @@ class BaseLLMClient(ABC):
     """
 
     CAPABILITIES: frozenset[Capability] = frozenset()
+
+    # Filled by bind_catalog_route. A hand-built client stays a chat client
+    # with no query instruction and the model's own vector width.
+    _catalog_task = "chat"
+    _embedding_sparse = False
+    _embedding_dimensions: int | None = None
+    _rerank_protocol = "score"
+    _rerank_top_k: int | None = None
+    _rerank_min_score = 0.0
 
     def supports(self, capability: Capability) -> bool:
         """Return whether this client implements the capability."""
@@ -126,18 +139,89 @@ class BaseLLMClient(ABC):
             context=f"{self.PROVIDER}.{context}",
         )
 
+    def _guarded_request(self, request: LLMRequest) -> LLMRequest:
+        """Run the process-wide request hook before this call reaches the wire.
+
+        The default hook returns the same object, so an unconfigured client
+        behaves as before. count_tokens is not a call site: it takes raw
+        strings and is a diagnostic.
+        """
+        from llm_mesh.hooks import apply_request_guard
+
+        return apply_request_guard(request, provider=self.PROVIDER)
+
     async def count_tokens(
         self, texts: list[str], *, model: str | None = None
     ) -> list[int]:
         """Count tokens with the provider tokenizer.
 
-        There is no character heuristic here. A client that cannot count
+        Raw strings are not passed through the request hook: this is a
+        diagnostic, not a prompt sent to a model. There is no character
+        heuristic here. A client that cannot count
         tokens says so instead of returning a guessed budget. The method is
         present on every subclass, so probe supports(Capability.COUNT_TOKENS)
         rather than hasattr.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not support {Capability.COUNT_TOKENS.value}"
+        )
+
+    def bind_catalog_route(self, route: dict) -> None:
+        """Copy embedding fields off a catalog route onto this instance.
+
+        ``task`` is ``chat`` when the route omits it. ``query_instruction``
+        wraps later ``embed(..., task="query")`` calls. ``sparse`` and
+        ``dimensions`` are the defaults for those calls.
+        """
+        from llm_mesh.embeddings import QueryInstruction, checked_dimensions, normalize_task
+        from llm_mesh.rerank import (
+            checked_min_score,
+            checked_top_k,
+            normalize_rerank_protocol,
+        )
+
+        self._catalog_task = normalize_task(route.get("task"))
+        self._query_instruction = QueryInstruction.parse(route.get("query_instruction"))
+        self._embedding_sparse = bool(route.get("sparse"))
+        self._embedding_dimensions = checked_dimensions(route.get("dimensions"))
+        self._rerank_protocol = normalize_rerank_protocol(route.get("rerank_protocol"))
+        self._rerank_top_k = checked_top_k(route.get("rerank_top_k"))
+        self._rerank_min_score = checked_min_score(route.get("rerank_min_score"))
+
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        model: str | None = None,
+        task: str = "document",
+        dimensions: int | None = None,
+        sparse: bool | None = None,
+    ) -> list:
+        """Embed each text. ``task="query"`` applies the model's query instruction.
+
+        The returned list has one entry per input, in input order. A provider
+        that cannot embed raises instead of calling a chat completion.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support {Capability.EMBEDDINGS.value}"
+        )
+
+    async def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        *,
+        model: str | None = None,
+        top_k: int | None = None,
+        min_score: float | None = None,
+    ) -> list:
+        """Score documents against ``query`` and return the best first.
+
+        A provider that cannot rerank raises. A failed call does not return
+        the input order: that list would look like a successful ranking.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support {Capability.RERANK.value}"
         )
 
     @abstractmethod

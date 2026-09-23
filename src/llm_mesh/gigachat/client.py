@@ -174,6 +174,7 @@ class GigaChatAsyncClient(BaseLLMClient):
         Capability.JSON_SCHEMA_MODE,
         Capability.LENGTH_RETRY,
         Capability.COUNT_TOKENS,
+        Capability.EMBEDDINGS,
     })
 
     def __init__(
@@ -719,10 +720,113 @@ class GigaChatAsyncClient(BaseLLMClient):
         # Unreachable.
         raise LLMError("GigaChat: internal error in retry logic")
 
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        model: str | None = None,
+        task: str = "document",
+        dimensions: int | None = None,
+        sparse: bool | None = None,
+    ) -> list[Any]:
+        """POST ``/embeddings``. GigaChat returns dense vectors only."""
+        from llm_mesh.embeddings import (
+            embedding_body,
+            embedding_options,
+            parse_embedding_response,
+            prepare_inputs,
+        )
+
+        if not texts:
+            return []
+        instruction, use_sparse, use_dimensions = embedding_options(
+            self, dimensions=dimensions, sparse=sparse, allow_sparse=False,
+        )
+        prepared = prepare_inputs(texts, task, instruction)
+        if use_dimensions is not None:
+            raise LLMValidationError(
+                "GigaChat embeddings do not accept dimensions; "
+                "the vector width is the model's"
+            )
+        body = embedding_body(model or self.model, prepared, sparse=False)
+        sem = self._ensure_semaphore()
+        if sem is None:
+            payload = await self._post_embeddings(body)
+        else:
+            async with sem:
+                payload = await self._post_embeddings(body)
+        return parse_embedding_response(payload, len(prepared), sparse=False)
+
+    async def _post_embeddings(self, body: dict[str, Any]) -> dict[str, Any]:
+        token = await self._ensure_token()
+        client = self._ensure_http()
+        url = f"{self._api_url}/embeddings"
+        max_attempts = self._max_transient_retries + 1
+        for attempt in range(max_attempts):
+            refreshed = False
+            while True:
+                try:
+                    resp = await client.post(
+                        url,
+                        json=body,
+                        headers=self._chat_headers(token, str(uuid.uuid4())),
+                    )
+                except (
+                    httpx.TimeoutException,
+                    httpx.ConnectError,
+                    httpx.ReadError,
+                    httpx.NetworkError,
+                    httpx.RemoteProtocolError,
+                ) as exc:
+                    if attempt + 1 >= max_attempts:
+                        raise LLMTimeoutError(
+                            f"GigaChat embeddings transient error after "
+                            f"{attempt + 1} attempts: {exc}"
+                        ) from exc
+                    delay = backoff_with_jitter(self._transient_backoff_s, attempt)
+                    logger.warning(
+                        "GigaChat embeddings: %s → retry in %.1fs (attempt %d/%d)",
+                        type(exc).__name__, delay, attempt + 1, max_attempts,
+                    )
+                    await asyncio.sleep(delay)
+                    break
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if not isinstance(data, dict):
+                        raise LLMValidationError(
+                            "GigaChat embeddings: response is not an object"
+                        )
+                    return data
+                if resp.status_code == 401 and not refreshed and self._max_refresh > 0:
+                    token = await self._refresh_token()
+                    refreshed = True
+                    continue
+                retryable = (
+                    resp.status_code == 429
+                    or resp.status_code in RETRYABLE_SERVER_STATUS
+                )
+                if retryable and attempt + 1 < max_attempts:
+                    delay = (
+                        retry_after_delay(resp, self._transient_backoff_s, attempt)
+                        if resp.status_code == 429
+                        else backoff_with_jitter(self._transient_backoff_s, attempt)
+                    )
+                    logger.warning(
+                        "GigaChat embeddings: %d → retry in %.1fs (attempt %d/%d)",
+                        resp.status_code, delay, attempt + 1, max_attempts,
+                    )
+                    await asyncio.sleep(delay)
+                    break
+                raise LLMError(
+                    f"GigaChat embeddings {resp.status_code}: {resp.text[:200]}"
+                )
+        raise LLMError("GigaChat embeddings: retries exhausted")
+
     async def generate_text(self, request: LLMRequest) -> LLMResponse:
         """Generate plain text without functions or tools. Suitable for code or prose generation
         where function calling is unnecessary; parse message.content as text.
         """
+        request = self._guarded_request(request)
         body = {
             "model": self._effective_model(request),
             "messages": _build_text_messages(request, tool_turns=False),
@@ -790,6 +894,7 @@ class GigaChatAsyncClient(BaseLLMClient):
         calls are not streamed as argument deltas; use generate_structured for structured
         output.
         """
+        request = self._guarded_request(request)
         body: dict[str, Any] = {
             "model": self._effective_model(request),
             "messages": _build_text_messages(request, tool_turns=False),
@@ -892,6 +997,7 @@ class GigaChatAsyncClient(BaseLLMClient):
         then choose text emulation rather than mistaking a forced single function for a
         model-selected tool.
         """
+        request = self._guarded_request(request)
         if request.tools_required:
             raise LLMValidationError(
                 "GigaChat: native tool-loop (tools_required) is not supported — "
@@ -1166,6 +1272,7 @@ class GigaChatAsyncClient(BaseLLMClient):
         events are emitted; use generate_structured for those. Emit Error and re-raise transport
         failures. Refresh credentials once on 401, as in generate_stream.
         """
+        request = self._guarded_request(request)
         body: dict[str, Any] = {
             "model": self._effective_model(request),
             "messages": _build_text_messages(request, tool_turns=False),

@@ -862,6 +862,7 @@ class AnthropicClient(BaseLLMClient):
 
     async def generate_text(self, request: LLMRequest) -> LLMResponse:
         """Generate plain text. Thinking, when enabled, is returned separately."""
+        request = self._guarded_request(request)
         self._last_served_tier = "text"
         body = self._base_body(request)
         payload = await self._send(body, length_retry=request.length_retry)
@@ -877,6 +878,7 @@ class AnthropicClient(BaseLLMClient):
         forced tool choice. ``tools`` lets the model select, with ``any`` when
         a tool call is required. ``tools_required`` never falls back to text.
         """
+        request = self._guarded_request(request)
         if request.mode == "text" or self._tool_choice_pref == "text":
             return await self.generate_text(request)
         if request.mode == "json_schema":
@@ -1083,6 +1085,7 @@ class AnthropicClient(BaseLLMClient):
         self, request: LLMRequest,
     ) -> AsyncIterator[LLMStreamChunk]:
         """Stream text and thinking deltas, then a terminal chunk with usage."""
+        request = self._guarded_request(request)
         body = self._base_body(request)
         body["stream"] = True
         visible: list[str] = []
@@ -1154,6 +1157,7 @@ class AnthropicClient(BaseLLMClient):
         A request without tools is streamed as plain text. The canary is
         scanned on this generator, including when the caller stops early.
         """
+        request = self._guarded_request(request)
         if request.tools:
             body = self._base_body(request, tools=True)
             body["tools"] = [

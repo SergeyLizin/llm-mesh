@@ -708,61 +708,63 @@
   },
   {
     "id": "gemini-31-pro-ron",
-    "sanitize_enums": true,
-    "notes": "sanitize_enums is required: numeric enums and nullable type unions fail on Cherry, Polza, and AIHubMix.",
     "title": "Gemini-3.1 Pro (on)",
-    "kind": "openai",
-    "disable_reasoning": null,
+    "kind": "gemini",
     "providers": [
       {
-        "name": "polza",
-        "model": "google/gemini-3.1-pro-preview",
-        "base_url_env": "POLZA_BASE_URL",
-        "api_key_env": "POLZA_API_KEY",
-        "reasoning_field": "reasoning"
+        "name": "google",
+        "model": "gemini-3.1-pro-preview",
+        "api_key_env": "GEMINI_API_KEY"
+      },
+      {
+        "name": "unorouter",
+        "model": "gemini-3.1-pro-preview",
+        "base_url": "https://api.unorouter.com/v1beta",
+        "api_key_env": "UNOROUTER_API_KEY",
+        "notes": "ПРОВЕРЕНО 23.09.2026: нативный generateContent отвечает 200 (и x-goog-api-key, и ?key=); list-метода /v1beta/models нет (404) — на листинге его не найти."
       },
       {
         "name": "aihubmix",
         "model": "gemini-3.1-pro-preview",
-        "base_url_env": "AIHUBMIX_BASE_URL",
-        "api_key_env": "AIHUBMIX_API_KEY"
-      },
-      {
-        "name": "cherry",
-        "model": "google/gemini-3.1-pro-preview",
-        "base_url_env": "CHERRY_BASE_URL",
-        "api_key_env": "CHERRY_API_KEY"
+        "base_url": "https://api.aihubmix.com/gemini/v1beta",
+        "api_key_env": "AIHUBMIX_API_KEY",
+        "notes": "ПРОВЕРЕНО 23.09.2026: нативный generateContent на /gemini/v1beta отвечает 200, авторизация только x-goog-api-key (Bearer отвергается)."
       }
-    ]
+    ],
+    "notes": "Переведена на нативный generateContent (kind gemini, провайдер google) 23.09.2026; прежние openai-совместимые прокси polza/aihubmix/cherry сняты с маршрута. sanitize_enums больше не нужен: он был workaround'ом numeric enums/nullable unions на прокси, нативный API принимает схемы как есть."
   },
   {
     "id": "gemini-3-flash-ron",
-    "sanitize_enums": true,
-    "notes": "sanitize_enums is required: numeric enums and nullable type unions fail on Cherry, Polza, and AIHubMix.",
     "title": "Gemini-3.6 Flash (on)",
-    "kind": "openai",
-    "disable_reasoning": null,
+    "kind": "gemini",
     "providers": [
       {
-        "name": "polza",
-        "model": "google/gemini-3.6-flash",
-        "base_url_env": "POLZA_BASE_URL",
-        "api_key_env": "POLZA_API_KEY",
-        "reasoning_field": "reasoning"
+        "name": "google",
+        "model": "gemini-3.6-flash",
+        "api_key_env": "GEMINI_API_KEY"
+      }
+    ],
+    "notes": "Переведена на нативный generateContent (kind gemini, провайдер google) 23.09.2026; прежние openai-совместимые прокси polza/aihubmix/cherry сняты с маршрута. sanitize_enums больше не нужен: он был workaround'ом numeric enums/nullable unions на прокси, нативный API принимает схемы как есть."
+  },
+  {
+    "id": "gemini-38-flash",
+    "title": "Gemini-3.8 Flash",
+    "kind": "gemini",
+    "providers": [
+      {
+        "name": "unorouter",
+        "model": "gemini-3.8-flash",
+        "base_url": "https://api.unorouter.com/v1beta",
+        "api_key_env": "UNOROUTER_API_KEY"
       },
       {
         "name": "aihubmix",
-        "model": "gemini-3.6-flash",
-        "base_url_env": "AIHUBMIX_BASE_URL",
+        "model": "gemini-3.8-flash",
+        "base_url": "https://api.aihubmix.com/gemini/v1beta",
         "api_key_env": "AIHUBMIX_API_KEY"
-      },
-      {
-        "name": "cherry",
-        "model": "google/gemini-3.6-flash",
-        "base_url_env": "CHERRY_BASE_URL",
-        "api_key_env": "CHERRY_API_KEY"
       }
-    ]
+    ],
+    "notes": "Нативный generateContent, отдельная запись: у агрегаторов живёт 3.8-flash, а в gemini-3-flash-ron — google-3.6 (другие веса, мешать нельзя). Live 23.09.2026: unorouter (x-goog-api-key и ?key=) и aihubmix (/gemini/v1beta, только x-goog-api-key) отвечают 200. Прямого google-маршрута нет: нативное имя 3.8 у Google не подтверждено — добавить, когда появится GEMINI_API_KEY."
   },
   {
     "id": "qwen37-max-ron",

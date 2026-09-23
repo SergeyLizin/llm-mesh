@@ -475,10 +475,10 @@ async def test_probe_timeout_none_uses_the_client_timeout():
 
 @pytest.mark.asyncio
 async def test_unimplemented_probe_is_a_caller_error():
-    client = _openai()
+    client = AnthropicClient(model="m", api_key="k")
     try:
-        with pytest.raises(TypeError, match="count_tokens"):
-            await check_client(client, probe=ProbeKind.COUNT_TOKENS)
+        with pytest.raises(TypeError, match="embed"):
+            await check_client(client, probe=ProbeKind.EMBED)
     finally:
         await client.aclose()
 

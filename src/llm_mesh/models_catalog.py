@@ -212,6 +212,16 @@ def _env(name: str | None) -> str:
     return os.environ.get(name or "", "").strip() if name else ""
 
 
+def route_task(route: dict) -> str:
+    """``chat`` when the route omits ``task``. An unknown task is rejected."""
+    from llm_mesh.embeddings import normalize_task
+
+    try:
+        return normalize_task(route.get("task"))
+    except ValueError as exc:
+        raise ModelCatalogError(f"{route.get('id')!r}: {exc}") from exc
+
+
 def route_model(route: dict) -> str:
     """Resolve the route model id from model, then the environment variable named by model_env."""
     return str(route.get("model") or "") or _env(route.get("model_env"))
@@ -352,7 +362,7 @@ def _build_gigachat_client(route: dict, env: dict) -> Any:
         kwargs["timeout_s"] = float(route["http_timeout"])
     from llm_mesh.gigachat.batch import batch_mode_enabled, get_batching_client
 
-    if batch_mode_enabled():
+    if batch_mode_enabled() and route_task(route) == "chat":
         return get_batching_client(
             model,
             credentials=kwargs.get("credentials"),
@@ -413,8 +423,9 @@ def _build_openai_client(route: dict, env: dict) -> Any:
         api_key=env["LLM_API_KEY"],
         label=env.get("LLM_PROVIDER_LABEL") or None,
         http_timeout=float(route["http_timeout"]) if route.get("http_timeout") else None,
+        tiktoken_encoding=str(route["tiktoken_encoding"]) if route.get("tiktoken_encoding") else None,
     )
-    if batch_mode_enabled():
+    if batch_mode_enabled() and route_task(route) == "chat":
         return BatchingLLMClient(OpenAIBatchClient(client=client), model=model)
     return client
 
@@ -441,7 +452,19 @@ def make_client(route: dict) -> Any:
         raise ModelCatalogError(
             f"{route.get('id')!r}: kind={kind!r}, expected one of {VALID_KINDS}"
         )
-    return builder(route, env)
+    task = route_task(route)
+    if task == "rerank" and kind != "openai":
+        raise ModelCatalogError(
+            f"{route.get('id')!r}: task 'rerank' is implemented for kind 'openai'"
+        )
+    client = builder(route, env)
+    bind = getattr(client, "bind_catalog_route", None)
+    if bind is not None:
+        try:
+            bind(route)
+        except ValueError as exc:
+            raise ModelCatalogError(f"{route.get('id')!r}: {exc}") from exc
+    return client
 
 
 def selected_model_id() -> str:

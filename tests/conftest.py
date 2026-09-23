@@ -6,7 +6,7 @@ from llm_mesh.canary import (
     check_and_warn,
     get_canary_context_token,
 )
-from llm_mesh.hooks import configure_canary_hooks
+from llm_mesh.hooks import configure_canary_hooks, configure_request_hook, identity_check_request
 
 # Restore the canary implementations, not the hooks dispatchers: wiring
 # hooks.get_canary_context_token back into itself would recurse.
@@ -34,3 +34,15 @@ def restore_canary_hooks():
         build_prompt=build_canary_prompt,
         check=check_and_warn,
     )
+
+
+@pytest.fixture(autouse=True)
+def restore_request_hook():
+    """Keep the identity request guard after tests that install their own.
+
+    Restore identity_check_request, not hooks.check_request: wiring the
+    dispatcher back into itself would recurse.
+    """
+    configure_request_hook(check_request=identity_check_request)
+    yield
+    configure_request_hook(check_request=identity_check_request)

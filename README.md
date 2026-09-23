@@ -71,10 +71,24 @@ client = make_client(route)
 | `generate_stream` | text chunks |
 | `generate_stream_events` | typed content, reasoning, tool, and completion events |
 | `count_tokens` | token counts, where the provider implements it |
+| `embed` | dense vectors, and a sparse vector when the provider returns one |
+| `rerank` | documents scored against a query, best first |
 
 `LLMRequest.model` overrides the client's model for that call. An empty string leaves the client's model in place. Limits the client has already learned (which tool form the gateway accepted, an open-object rejection, a forced temperature) stay on the instance and apply to every per-call model. A model that needs different limits needs its own client.
 
-OpenAI has no `count_tokens`. Anthropic posts each string to `/v1/messages/count_tokens`, Gemini to `:countTokens`, and GigaChat posts the whole list to `/tokens/count`. `supports(Capability.COUNT_TOKENS)` tells you whether the call can succeed.
+`count_tokens` returns one integer per string. Anthropic posts each string to `/v1/messages/count_tokens`, Gemini to `:countTokens`, and GigaChat posts the whole list to `/tokens/count`. OpenAI-compatible clients count locally with tiktoken and do not call the gateway. A model tiktoken knows (`gpt-4o`, `gpt-4`) selects that encoding. Any other model name needs `tiktoken_encoding` on the client or the catalog route (`o200k_base`, `cl100k_base`). The count is the string itself, without chat-message overhead. `supports(Capability.COUNT_TOKENS)` tells you whether the call can succeed.
+
+`embed` sends a list of strings and returns one `Embedding` per input, in that order. `task="document"` is the default. `task="query"` applies the model's `query_instruction` when the template contains `{query}`. An empty template leaves queries and documents identical. OpenAI-compatible gateways can return a sparse vector in the same response (`sparse=True`, wire field `return_sparse`). GigaChat and Gemini refuse `sparse=True`. GigaChat also refuses `dimensions`; the vector width is the model's. Gemini sends `taskType` `RETRIEVAL_DOCUMENT` or `RETRIEVAL_QUERY` and, when set, `outputDimensionality`. A catalog route with both `query_instruction` and Gemini's task type wraps the query and still sends `taskType`, so a route that should rely on `taskType` alone leaves `query_instruction` empty.
+
+Anthropic has no embeddings API. `embed` raises `NotImplementedError`, and `supports(Capability.EMBEDDINGS)` is false.
+
+Embedding calls share the client's `LLM_MAX_CONCURRENT` semaphore with chat calls on that same instance. There is no separate process-wide limiter.
+
+OpenAI's file Batch API accepts embeddings as well as chat. `OpenAIBatchClient.build_embedding_lines` writes one `/v1/embeddings` line per input, and `run_embedding_batch` submits that file. `LLM_BATCH_MODE` still coalesces chat completions only. A catalog route with `"task": "embeddings"` or `"task": "rerank"` is not wrapped in the chat coalescer.
+
+`rerank` scores each document against the query and returns `RerankHit` values, highest score first. OpenAI-compatible gateways use `POST /score` with `text_1` (the query) and `text_2` (the documents). A base URL that ends in `/v1` is not sent to `/v1/score`; that path is a 404, and the client calls `/score` on the host. `rerank_protocol="llama"` uses llama.cpp's `POST /v1/rerank` (`query` / `documents`, `relevance_score`). A catalog route sets the same field. `rerank_top_k` and `rerank_min_score` are the defaults for later calls. A positive floor drops documents under it; if every document is under the floor, the ranking is returned without the floor so the scores stay visible. A response that does not score every document raises. The input order is not returned in place of a failed call.
+
+`LocalCrossEncoder` scores the same pairs in-process. Install it with `llm-mesh[rerank]` (`sentence-transformers`). The model loads on the first call. Anthropic, Gemini, and GigaChat have no rerank method.
 
 ## Providers
 
@@ -84,8 +98,10 @@ OpenAI has no `count_tokens`. Anthropic posts each string to `/v1/messages/count
 | Default endpoint | `LLM_BASE_URL` (required) | `https://api.anthropic.com` | `https://generativelanguage.googleapis.com/v1beta` | `https://gigachat.devices.sberbank.ru/api/v1` |
 | API key | `LLM_API_KEY` | `LLM_API_KEY` | `LLM_API_KEY` | OAuth client credentials in `LLM_API_KEY`, or a `token` |
 | Structured output | tools, then declared `response_format` | native tool use and `output_config.format` | `responseSchema` and function calling | legacy functions and native JSON Schema |
-| `count_tokens` | no | yes | yes | yes |
-| Batch | yes | no | no | yes |
+| `count_tokens` | local tiktoken | yes | yes | yes |
+| `embed` | yes | no | yes | yes |
+| `rerank` | `/score` or `/v1/rerank` | no | no | no |
+| Batch | chat and embeddings | no | no | chat |
 
 ```python
 from llm_mesh import AnthropicClient, GeminiClient, GigaChatAsyncClient
@@ -180,7 +196,7 @@ Catalog kinds are `openai`, `anthropic`, `gemini`, and `gigachat`. `anthropic` a
 
 ### Connection checks
 
-`llm-mesh --check` and `check_route` send one cheap request: `generate_text` for OpenAI-compatible clients, `count_tokens` for Anthropic, Gemini, and GigaChat. The reply text is not judged. The probe is capped at 60 seconds.
+`llm-mesh --check` and `check_route` send one cheap request: `embed` for a catalog route whose `task` is `embeddings`, `rerank` for `task` `rerank`, `generate_text` for other OpenAI-compatible clients, and `count_tokens` for Anthropic, Gemini, and GigaChat chat routes. OpenAI's token count stays off this path: tiktoken does not contact the gateway, so a chat route is still proved with one generation. The reply text is not judged. The probe is capped at 60 seconds. A route marked `embeddings` on a client that cannot embed fails the check instead of sending a chat completion.
 
 ```sh
 llm-mesh --check your-model-id
@@ -262,6 +278,23 @@ finally:
 ```
 
 Batch results are not scanned. A custom prompt or detector can replace the defaults through `llm_mesh.hooks.configure_canary_hooks()`.
+
+### Request guard hook
+
+`configure_request_hook` is the seam in front of the wire. The library ships no detection patterns and no redaction. The hook body belongs to the application: a prompt-injection guard, a PII filter, or a quota check.
+
+| Hook returns | Effect |
+| --- | --- |
+| the same `LLMRequest` | the call proceeds unchanged |
+| a different `LLMRequest` | that object is what the provider receives |
+| `None` | `LLMRequestBlocked` |
+| an exception | that exception propagates, unwrapped |
+
+`LLMRequestBlocked` is not a validation error. Tier ladders, length retry, and degradation catch `LLMValidationError` and provider errors and may try another path. A guard refusal is not one of those paths. `no_degrade` and `preserve` do not apply, and the refusal does not count as degradation.
+
+`count_tokens` is not guarded. It takes raw strings and is a diagnostic. A connectivity probe that calls `generate_text` is guarded like any other request, so a refusal shows up as that route check's `error_type`.
+
+The hook is process-wide: one function for every client and thread. A hook that needs per-session isolation has to do that itself.
 
 ## Adding a provider
 

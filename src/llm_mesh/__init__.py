@@ -13,6 +13,7 @@ from llm_mesh.types import (
     LLMAuthError,
     LLMError,
     LLMRequest,
+    LLMRequestBlocked,
     LLMResponse,
     LLMTimeoutError,
     LLMValidationError,
@@ -23,20 +24,27 @@ __all__ = [
     "BaseLLMClient",
     "BatchLLMClient",
     "Capability",
+    "Embedding",
     "EventStreamGenerator",
     "LLMAuthError",
     "LLMClient",
     "LLMError",
     "LLMRequest",
+    "LLMRequestBlocked",
     "LLMResponse",
     "LLMTimeoutError",
     "LLMValidationError",
+    "LocalCrossEncoder",
+    "QueryInstruction",
+    "RerankHit",
     "StreamGenerator",
     "StructuredGenerator",
     "TextGenerator",
 ]
 
 from llm_mesh.base import BaseLLMClient, Capability
+from llm_mesh.embeddings import Embedding, QueryInstruction
+from llm_mesh.rerank import LocalCrossEncoder, RerankHit
 
 from .openai import OpenAIClient
 from .anthropic import AnthropicClient, AnthropicError

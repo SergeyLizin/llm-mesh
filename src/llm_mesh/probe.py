@@ -47,6 +47,8 @@ class ProbeKind(str, Enum):
 
     GENERATE_TEXT = "generate_text"
     COUNT_TOKENS = "count_tokens"
+    EMBED = "embed"
+    RERANK = "rerank"
 
 
 class ConnectionCheck(BaseModel):
@@ -84,11 +86,19 @@ def _identity(client: Any) -> tuple[str, str, str]:
 def _probe_for(client: Any) -> ProbeKind:
     """Pick the cheapest call that still proves this client's path.
 
+    An embeddings catalog route is proved with one short ``embed`` call.
+    A rerank route is proved with one ``/score`` or ``/v1/rerank`` call.
+    A chat completion against either model is the wrong endpoint.
     GigaChat's tokenizer, Anthropic's messages count endpoint, and
     Gemini's countTokens authenticate without a chat completion.
-    OpenAI-compatible endpoints have no such call, so they send one
-    tiny generation.
+    OpenAI's count is local tiktoken and does not reach the gateway, so
+    a chat route still sends one tiny generation.
     """
+    task = getattr(client, "_catalog_task", "chat")
+    if task == "embeddings":
+        return ProbeKind.EMBED
+    if task == "rerank":
+        return ProbeKind.RERANK
     if isinstance(client, (GigaChatAsyncClient, AnthropicClient, GeminiClient)):
         return ProbeKind.COUNT_TOKENS
     if isinstance(client, OpenAIClient):
@@ -119,6 +129,12 @@ def _probe_request() -> LLMRequest:
 async def _invoke(client: Any, probe: ProbeKind) -> None:
     if probe is ProbeKind.COUNT_TOKENS:
         await client.count_tokens(["connectivity probe"])
+        return
+    if probe is ProbeKind.EMBED:
+        await client.embed(["connectivity probe"])
+        return
+    if probe is ProbeKind.RERANK:
+        await client.rerank("connectivity probe", ["connectivity document"])
         return
     if probe is ProbeKind.GENERATE_TEXT:
         # reasoning_effort stays unset so Anthropic does not enable thinking.
@@ -181,7 +197,7 @@ async def check_client(
     The caller owns ``client``. This function does not call ``aclose()``.
     An unrecognized client type raises ``TypeError`` instead of reporting
     a failed connection. A probe the client does not implement
-    (``count_tokens`` on OpenAI, for example) also raises ``TypeError``:
+    (``embed`` on Anthropic, for example) also raises ``TypeError``:
     that is a caller error, not a dead route. ``CancelledError`` and
     ``KeyboardInterrupt`` propagate. Every other exception becomes
     ``ok=False``.

@@ -97,6 +97,7 @@ def generate_content_url(
     *,
     stream: bool = False,
     count: bool = False,
+    embed: bool = False,
 ) -> str:
     """Build ``<base>/models/{model}:<method>``.
 
@@ -108,7 +109,9 @@ def generate_content_url(
         root = base
     else:
         root = f"{base}/v1beta"
-    if count:
+    if embed:
+        action = "batchEmbedContents"
+    elif count:
         action = "countTokens"
     elif stream:
         action = "streamGenerateContent"
@@ -413,6 +416,7 @@ class GeminiClient(BaseLLMClient):
         Capability.JSON_SCHEMA_MODE,
         Capability.LENGTH_RETRY,
         Capability.COUNT_TOKENS,
+        Capability.EMBEDDINGS,
     })
 
     def __init__(
@@ -663,8 +667,9 @@ class GeminiClient(BaseLLMClient):
         *,
         model: str,
         count: bool = False,
+        embed: bool = False,
     ) -> tuple[dict[str, Any], str | None]:
-        url = generate_content_url(self._base, model, count=count)
+        url = generate_content_url(self._base, model, count=count, embed=embed)
         headers = self._headers()
         last_exc: Exception | None = None
         for attempt in range(self._max_retries + 1):
@@ -733,12 +738,13 @@ class GeminiClient(BaseLLMClient):
         *,
         model: str,
         count: bool = False,
+        embed: bool = False,
     ) -> tuple[dict[str, Any], str | None]:
         sem = self._ensure_semaphore()
         if sem is None:
-            return await self._post(body, model=model, count=count)
+            return await self._post(body, model=model, count=count, embed=embed)
         async with sem:
-            return await self._post(body, model=model, count=count)
+            return await self._post(body, model=model, count=count, embed=embed)
 
     async def _send(
         self,
@@ -813,8 +819,71 @@ class GeminiClient(BaseLLMClient):
             counts.append(raw)
         return counts
 
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        model: str | None = None,
+        task: str = "document",
+        dimensions: int | None = None,
+        sparse: bool | None = None,
+    ) -> list[Any]:
+        """POST ``:batchEmbedContents``. ``task`` selects Gemini's ``taskType``."""
+        from llm_mesh.embeddings import (
+            Embedding,
+            checked_dimensions,
+            embedding_options,
+            normalize_embedding_side,
+            prepare_inputs,
+        )
+
+        if not texts:
+            return []
+        side = normalize_embedding_side(task)
+        instruction, use_sparse, use_dimensions = embedding_options(
+            self, dimensions=dimensions, sparse=sparse, allow_sparse=False,
+        )
+        prepared = prepare_inputs(texts, side, instruction)
+        chosen = model or self._model
+        bare = chosen.removeprefix("models/")
+        wire_model = f"models/{bare}"
+        task_type = "RETRIEVAL_QUERY" if side == "query" else "RETRIEVAL_DOCUMENT"
+        requests: list[dict[str, Any]] = []
+        for text in prepared:
+            item: dict[str, Any] = {
+                "model": wire_model,
+                "content": {"parts": [{"text": text}]},
+                "taskType": task_type,
+            }
+            width = checked_dimensions(use_dimensions)
+            if width is not None:
+                item["outputDimensionality"] = width
+            requests.append(item)
+        data, _request_id = await self._post_limited(
+            {"requests": requests}, model=bare, embed=True,
+        )
+        rows = data.get("embeddings")
+        if not isinstance(rows, list):
+            raise LLMValidationError(
+                f"{self.PROVIDER}: embeddings response has no embeddings array"
+            )
+        vectors: list[Embedding] = []
+        for row in rows:
+            values = row.get("values") if isinstance(row, dict) else None
+            if not isinstance(values, list) or not values:
+                raise LLMValidationError(
+                    f"{self.PROVIDER}: embeddings entry has no values"
+                )
+            vectors.append(Embedding(dense=[float(value) for value in values]))
+        if len(vectors) != len(prepared):
+            raise LLMValidationError(
+                f"{self.PROVIDER}: got {len(vectors)} vectors for {len(prepared)} inputs"
+            )
+        return vectors
+
     async def generate_text(self, request: LLMRequest) -> LLMResponse:
         """Generate plain text. Thought parts are returned separately."""
+        request = self._guarded_request(request)
         model = self._model_of(request)
         body = self._body(request, structured=False)
         payload, request_id = await self._send(
@@ -844,6 +913,7 @@ class GeminiClient(BaseLLMClient):
         that violate the schema raise ``LLMValidationError`` unless
         ``validate_schema`` is false.
         """
+        request = self._guarded_request(request)
         if request.mode == "text":
             return await self.generate_text(request)
         model = self._model_of(request)
@@ -988,6 +1058,7 @@ class GeminiClient(BaseLLMClient):
         self, request: LLMRequest,
     ) -> AsyncIterator[LLMStreamChunk]:
         """Stream text and thought deltas, then one terminal chunk with usage."""
+        request = self._guarded_request(request)
         visible: list[str] = []
         try:
             async for chunk in self._under_semaphore(self._stream_chunks(request)):
@@ -1034,6 +1105,7 @@ class GeminiClient(BaseLLMClient):
         self, request: LLMRequest,
     ) -> AsyncIterator[StreamEvent]:
         """Stream typed deltas, then one Complete. Errors are emitted and re-raised."""
+        request = self._guarded_request(request)
         visible: list[str] = []
         try:
             async for event in self._under_semaphore(self._stream_events(request)):

@@ -263,6 +263,12 @@ class OpenAIClient(BaseLLMClient):
         # response_format json_schema/json_object is a declared tier, not the default.
         Capability.JSON_SCHEMA_MODE,
         Capability.LENGTH_RETRY,
+        Capability.EMBEDDINGS,
+        # Local tiktoken count. This does not call the gateway, so the
+        # connectivity probe stays a one-token generation.
+        Capability.COUNT_TOKENS,
+        # Gateway /score or llama.cpp /v1/rerank. Not a chat completion.
+        Capability.RERANK,
     })
 
     def __init__(
@@ -282,6 +288,8 @@ class OpenAIClient(BaseLLMClient):
         tool_choice_pref: str | None = None,
         validate_schema: bool = True,
         fallback_policy: Literal["recover", "preserve"] = "recover",
+        tiktoken_encoding: str | None = None,
+        rerank_protocol: str | None = None,
     ) -> None:
         if fallback_policy not in ("recover", "preserve"):
             raise ValueError("fallback_policy must be 'recover' or 'preserve'")
@@ -293,9 +301,16 @@ class OpenAIClient(BaseLLMClient):
                 f"({'/'.join(_BASE_URL_ENVS)} are not set) — "
                 "specify endpoint, for example 'https://host/v1'"
             )
-        self.URL = chat_completions_url(base)
+        self._base = base.rstrip("/")
+        self.URL = chat_completions_url(self._base)
         self.PROVIDER = label or get_env("LLM_PROVIDER_LABEL") or "openai"
         self._model = model
+        # Set when the model name is not in tiktoken's map. Unset means
+        # encoding_for_model, and an unknown model fails the count.
+        self._tiktoken_encoding = (tiktoken_encoding or "").strip() or None
+        from llm_mesh.rerank import normalize_rerank_protocol
+
+        self._rerank_protocol = normalize_rerank_protocol(rerank_protocol)
         self._extra_headers = extra_headers or {}
         self._key = api_key or self._env_first(_API_KEY_ENVS)
         if not self._key:
@@ -943,10 +958,156 @@ class OpenAIClient(BaseLLMClient):
         """Route label for this call. Do not write it back onto the client."""
         return f"{self.PROVIDER}/{self._effective_model(request)}"
 
+    async def count_tokens(
+        self, texts: list[str], *, model: str | None = None,
+    ) -> list[int]:
+        """Count each string with tiktoken, in order.
+
+        The count does not include chat-message overhead and does not call
+        the endpoint. ``tiktoken_encoding`` on the client wins over the model
+        name. Without it, the model must be one tiktoken knows.
+        """
+        if not texts:
+            return []
+        from llm_mesh.openai.tokenize import count_text_tokens, encoding_name
+
+        name = encoding_name(model or self._model, self._tiktoken_encoding)
+        return count_text_tokens(texts, name)
+
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        model: str | None = None,
+        task: str = "document",
+        dimensions: int | None = None,
+        sparse: bool | None = None,
+    ) -> list[Any]:
+        """POST ``/embeddings``. One response entry per input, ordered by ``index``."""
+        from llm_mesh.embeddings import (
+            embedding_body,
+            embedding_options,
+            embeddings_url,
+            parse_embedding_response,
+            prepare_inputs,
+        )
+
+        if not texts:
+            return []
+        instruction, use_sparse, use_dimensions = embedding_options(
+            self, dimensions=dimensions, sparse=sparse, allow_sparse=True,
+        )
+        prepared = prepare_inputs(texts, task, instruction)
+        body = embedding_body(
+            model or self._model,
+            prepared,
+            sparse=use_sparse,
+            dimensions=use_dimensions,
+        )
+        url = embeddings_url(self._base)
+        sem = self._ensure_semaphore()
+        if sem is None:
+            payload = await self._post_json(url, body, what="embeddings")
+        else:
+            async with sem:
+                payload = await self._post_json(url, body, what="embeddings")
+        return parse_embedding_response(payload, len(prepared), sparse=use_sparse)
+
+    async def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        *,
+        model: str | None = None,
+        top_k: int | None = None,
+        min_score: float | None = None,
+    ) -> list[Any]:
+        """Score ``documents`` against ``query``. Highest score first.
+
+        ``rerank_protocol="score"`` posts ``text_1``/``text_2`` to ``/score``.
+        ``"llama"`` posts ``query``/``documents`` to ``/v1/rerank``. A response
+        that does not score every document raises.
+        """
+        from llm_mesh.rerank import (
+            llama_body,
+            llama_rerank_url,
+            parse_llama_payload,
+            parse_score_payload,
+            rank_hits,
+            score_body,
+            score_url,
+        )
+
+        if not documents:
+            return []
+        if not isinstance(query, str) or not query.strip():
+            raise LLMValidationError("rerank: query is empty")
+        chosen = model or self._model
+        if self._rerank_protocol == "llama":
+            url = llama_rerank_url(self._base)
+            body = llama_body(chosen, query, documents)
+            parse = parse_llama_payload
+        else:
+            url = score_url(self._base)
+            body = score_body(chosen, query, documents)
+            parse = parse_score_payload
+        sem = self._ensure_semaphore()
+        if sem is None:
+            payload = await self._post_json(url, body, what="rerank")
+        else:
+            async with sem:
+                payload = await self._post_json(url, body, what="rerank")
+        pairs = parse(payload, len(documents))
+        return rank_hits(
+            documents,
+            pairs,
+            top_k=self._rerank_top_k if top_k is None else top_k,
+            min_score=self._rerank_min_score if min_score is None else min_score,
+        )
+
+    async def _post_json(
+        self, url: str, body: dict[str, Any], *, what: str,
+    ) -> dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self._key}", **self._extra_headers}
+        last_exc: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                response = await self._ensure_http().post(url, headers=headers, json=body)
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError,
+                    httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+                last_exc = exc
+                if attempt == self._max_retries:
+                    err_cls = LLMTimeoutError if isinstance(exc, httpx.TimeoutException) else OpenAIError
+                    raise err_cls(
+                        f"{self.PROVIDER} {what} network error after "
+                        f"{attempt + 1} attempts: {exc}"
+                    ) from exc
+                await asyncio.sleep(backoff_with_jitter(self._retry_backoff_s, attempt))
+                continue
+            if response.status_code == 200:
+                data = response.json()
+                if not isinstance(data, dict):
+                    raise LLMValidationError(f"{what}: response is not an object")
+                return data
+            if response.status_code in (401, 403):
+                raise LLMAuthError(
+                    f"{self.PROVIDER} {what}: authentication error — {response.text[:300]}"
+                )
+            if response.status_code in RETRYABLE_STATUS and attempt < self._max_retries:
+                await asyncio.sleep(backoff_with_jitter(self._retry_backoff_s, attempt))
+                continue
+            raise OpenAIError(
+                f"{self.PROVIDER} {what}: HTTP {response.status_code} — {response.text[:300]}",
+                status_code=response.status_code,
+                detail=response.text[:300],
+            )
+        raise OpenAIError(f"{self.PROVIDER} {what} retry exhausted: {last_exc}")
+
     async def generate_text(self, request: LLMRequest) -> LLMResponse:
         """Generate plain text without tools. Return message.content as LLMResponse.text with empty
         arguments; callers may parse structured text themselves.
         """
+        request = self._guarded_request(request)
         body: dict[str, Any] = {
             "model": self._effective_model(request),
             "messages": self._messages(request),
@@ -1001,6 +1162,7 @@ class OpenAIClient(BaseLLMClient):
         """Stream plain text from OpenAI SSE content deltas until [DONE]. Use generate_structured
         for function-calling output.
         """
+        request = self._guarded_request(request)
         body: dict[str, Any] = {
             "model": self._effective_model(request),
             "messages": self._messages(request),
@@ -1378,6 +1540,7 @@ class OpenAIClient(BaseLLMClient):
         text emulation. Preserve explicit mode selection, no-degrade measurements, schema
         validation, and the tier that actually served the response.
         """
+        request = self._guarded_request(request)
         # In multi-tool mode, let the model choose from request.tools. If it instead ignores
         # tools and emits JSON content, learn that behavior and fall back to the forced
         # single-function schema.
@@ -2091,6 +2254,7 @@ class OpenAIClient(BaseLLMClient):
         transport exceptions so consumers can observe stream interruption. Request construction
         follows the text streaming path.
         """
+        request = self._guarded_request(request)
         body: dict[str, Any] = {
             "model": self._effective_model(request),
             "messages": self._messages(request),

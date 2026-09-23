@@ -170,6 +170,8 @@ _CAPABILITY_METHODS = {
     Capability.JSON_SCHEMA_MODE: "generate_structured",
     Capability.LENGTH_RETRY: "generate_text",
     Capability.COUNT_TOKENS: "count_tokens",
+    Capability.EMBEDDINGS: "embed",
+    Capability.RERANK: "rerank",
 }
 
 _INTERACTIVE = frozenset({
@@ -186,6 +188,9 @@ _INTERACTIVE = frozenset({
 _EXPECTED_CAPABILITIES = {
     OpenAIClient: _INTERACTIVE | frozenset({
         Capability.TOOLS_REQUIRED,
+        Capability.EMBEDDINGS,
+        Capability.COUNT_TOKENS,
+        Capability.RERANK,
     }),
     AnthropicClient: _INTERACTIVE | frozenset({
         Capability.TOOLS_REQUIRED,
@@ -194,10 +199,12 @@ _EXPECTED_CAPABILITIES = {
     GeminiClient: _INTERACTIVE | frozenset({
         Capability.TOOLS_REQUIRED,
         Capability.COUNT_TOKENS,
+        Capability.EMBEDDINGS,
     }),
     # Legacy functions API: one selected function, no native tool loop.
     GigaChatAsyncClient: _INTERACTIVE | frozenset({
         Capability.COUNT_TOKENS,
+        Capability.EMBEDDINGS,
     }),
 }
 
@@ -301,8 +308,10 @@ def test_registry_client_satisfies_llm_client(monkeypatch, kind: str, cls: type)
             param for param in inspect.signature(method).parameters
             if param != "self"
         ]
-        if method_name == "count_tokens":
+        if method_name in ("count_tokens", "embed"):
             assert params[0] == "texts"
+        elif method_name == "rerank":
+            assert params[0] == "query"
         else:
             assert params[0] == "request"
         assert client.supports(capability)
@@ -477,7 +486,7 @@ def test_supports_ignores_instance_switches(monkeypatch) -> None:
     assert openai.supports(Capability.TOOLS)
     gigachat = GigaChatAsyncClient(token="t", tool_choice="single")
     assert gigachat.supports(Capability.MULTI_TOOL)
-    assert not openai.supports(Capability.COUNT_TOKENS)
+    assert openai.supports(Capability.COUNT_TOKENS)
     assert gigachat.supports(Capability.COUNT_TOKENS)
     assert _anthropic().supports(Capability.COUNT_TOKENS)
     assert _gemini().supports(Capability.COUNT_TOKENS)
@@ -485,6 +494,9 @@ def test_supports_ignores_instance_switches(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_count_tokens_names_the_missing_capability() -> None:
+    """The base implementation still refuses. OpenAI overrides it with tiktoken."""
+    from llm_mesh.base import BaseLLMClient
+
     client = _openai()
     with pytest.raises(NotImplementedError, match="does not support count_tokens"):
-        await client.count_tokens(["hello"])
+        await BaseLLMClient.count_tokens(client, ["hello"])

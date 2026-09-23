@@ -57,6 +57,7 @@ MAX_BATCH_FILE_BYTES = 200 * 1024 * 1024
 # Fixed by the Batch API. Callers cannot ask for a shorter window.
 COMPLETION_WINDOW = "24h"
 BATCH_ENDPOINT = "/v1/chat/completions"
+EMBEDDINGS_BATCH_ENDPOINT = "/v1/embeddings"
 
 # 429 and 529 are overload; 500-504 are transient gateway failures. Same backoff
 # curve as GigaChat batch: start at LLM_BATCH_429_BACKOFF_START, grow ×1.5, cap 45s.
@@ -215,6 +216,7 @@ class OpenAIBatchClient:
 
     def build_chat_lines(
         self, requests: Sequence[LLMRequest], *, model: str | None = None,
+        ids: Sequence[int] | None = None,
     ) -> list[dict[str, Any]]:
         """JSONL records in input order. Each line's model is ``request.model`` or the
         batch default. The body is exactly ``OpenAIClient.build_completion_body``.
@@ -224,8 +226,13 @@ class OpenAIBatchClient:
                 "OpenAIBatchClient: a completion client is required to build request bodies"
             )
         resolved = model or self._openai._model
+        if ids is not None and len(ids) != len(requests):
+            raise OpenAIBatchError(
+                "OpenAIBatchClient: line ids must match the request list"
+            )
         lines: list[dict[str, Any]] = []
-        for i, req in enumerate(requests):
+        for n, req in enumerate(requests):
+            i = n if ids is None else ids[n]
             line_model = req.model or resolved
             # Stamp the batch default onto the request so the body builder does not
             # fall back to a different model configured on the client.
@@ -236,6 +243,43 @@ class OpenAIBatchClient:
                 "method": "POST",
                 "url": BATCH_ENDPOINT,
                 "body": self._openai.build_completion_body(prepared, structured=structured),
+            })
+        return lines
+
+    def build_embedding_lines(
+        self,
+        texts: Sequence[str],
+        *,
+        model: str | None = None,
+        task: str = "document",
+        dimensions: int | None = None,
+        sparse: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        """One ``/v1/embeddings`` line per input. Query instructions are applied first."""
+        from llm_mesh.embeddings import (
+            embedding_body,
+            embedding_options,
+            prepare_inputs,
+        )
+
+        if self._openai is None:
+            raise OpenAIBatchError(
+                "OpenAIBatchClient: a completion client is required to build embedding bodies"
+            )
+        instruction, use_sparse, use_dimensions = embedding_options(
+            self._openai, dimensions=dimensions, sparse=sparse, allow_sparse=True,
+        )
+        prepared = prepare_inputs(list(texts), task, instruction)
+        chosen = model or self._openai._model
+        lines: list[dict[str, Any]] = []
+        for i, text in enumerate(prepared):
+            lines.append({
+                "custom_id": str(i),
+                "method": "POST",
+                "url": EMBEDDINGS_BATCH_ENDPOINT,
+                "body": embedding_body(
+                    chosen, [text], sparse=use_sparse, dimensions=use_dimensions,
+                ),
             })
         return lines
 
@@ -273,12 +317,14 @@ class OpenAIBatchClient:
             raise OpenAIBatchError("OpenAI Batch API: file upload did not return an id")
         return str(file_id)
 
-    async def create_batch(self, input_file_id: str) -> dict[str, Any]:
+    async def create_batch(
+        self, input_file_id: str, *, endpoint: str = BATCH_ENDPOINT,
+    ) -> dict[str, Any]:
         resp = await self._request(
             "POST", "batches", context="create_batch",
             json={
                 "input_file_id": input_file_id,
-                "endpoint": BATCH_ENDPOINT,
+                "endpoint": endpoint,
                 "completion_window": COMPLETION_WINDOW,
             },
         )
@@ -371,8 +417,19 @@ class OpenAIBatchClient:
             raise OpenAIBatchError(
                 "OpenAIBatchClient: a completion client is required to build request bodies"
             )
-        self._check_request_count(requests)
-        lines = self.build_chat_lines(requests, model=model)
+        from llm_mesh.hooks import guard_batch_requests
+
+        provider = self._openai.PROVIDER
+        accepted, blocked = guard_batch_requests(
+            requests, provider=provider, return_exceptions=return_exceptions,
+        )
+        if not accepted:
+            return [blocked[i] for i in range(len(requests))]
+        passing = [req for _, req in accepted]
+        self._check_request_count(passing)
+        lines = self.build_chat_lines(
+            passing, model=model, ids=[i for i, _ in accepted],
+        )
         payload = self.build_jsonl(lines)
         self._check_payload_size(payload)
 
@@ -388,10 +445,10 @@ class OpenAIBatchClient:
                 f"status={status.get('status')!r})"
             )
         raw_results = await self.download_results(str(output_file_id))
-        if len(raw_results) != len(requests):
+        if len(raw_results) != len(accepted):
             raise OpenAIBatchError(
                 f"OpenAI Batch: result count mismatch "
-                f"(sent {len(requests)} ids, received {len(raw_results)})"
+                f"(sent {len(accepted)} ids, received {len(raw_results)})"
             )
 
         by_id: dict[str, dict[str, Any]] = {}
@@ -402,8 +459,13 @@ class OpenAIBatchClient:
             by_id[str(custom_id)] = entry
 
         resolved = model or self._openai._model
+        guarded = dict(accepted)
         out: list[LLMResponse | BaseException] = []
-        for i, req in enumerate(requests):
+        for i, _req in enumerate(requests):
+            if i in blocked:
+                out.append(blocked[i])
+                continue
+            req = guarded[i]
             entry = by_id.get(str(i))
             err: BaseException | None = None
             response: LLMResponse | None = None
@@ -456,3 +518,113 @@ class OpenAIBatchClient:
         except (LLMError, OpenAIError, KeyError, TypeError, ValueError) as exc:
             return OpenAIBatchError(f"Batch subtask id={index}: {exc}"), None
         return None, cast("LLMResponse", parsed)
+
+    async def run_embedding_batch(
+        self,
+        texts: Sequence[str],
+        *,
+        model: str | None = None,
+        task: str = "document",
+        dimensions: int | None = None,
+        sparse: bool | None = None,
+        poll_interval: float | None = None,
+        max_wait: float | None = None,
+        return_exceptions: bool = False,
+    ) -> list[Any]:
+        """Submit an embeddings batch and return one vector per input, in input order.
+
+        The file endpoint is ``/v1/embeddings``. A failed line raises, or is
+        returned in place when ``return_exceptions`` is set. A count mismatch
+        raises for the whole batch.
+        """
+        from llm_mesh.embeddings import Embedding, parse_embedding_response
+
+        items = list(texts)
+        if not items:
+            return []
+        if self._openai is None:
+            raise OpenAIBatchError(
+                "OpenAIBatchClient: a completion client is required to build embedding bodies"
+            )
+        if len(items) > MAX_BATCH_REQUESTS:
+            raise OpenAIBatchError(
+                f"OpenAI Batch API accepts at most {MAX_BATCH_REQUESTS} requests "
+                f"per input file (got {len(items)})"
+            )
+        lines = self.build_embedding_lines(
+            items, model=model, task=task, dimensions=dimensions, sparse=sparse,
+        )
+        payload = self.build_jsonl(lines)
+        self._check_payload_size(payload)
+        file_id = await self.upload_file(payload)
+        batch = await self.create_batch(file_id, endpoint=EMBEDDINGS_BATCH_ENDPOINT)
+        status = await self.wait_for_completion(
+            str(batch["id"]), poll_interval=poll_interval, max_wait=max_wait,
+        )
+        output_file_id = status.get("output_file_id")
+        if not output_file_id:
+            raise OpenAIBatchError(
+                f"OpenAI Batch API: missing output_file_id (batch_id={batch.get('id')!r}, "
+                f"status={status.get('status')!r})"
+            )
+        raw_results = await self.download_results(str(output_file_id))
+        if len(raw_results) != len(items):
+            raise OpenAIBatchError(
+                f"OpenAI Batch: result count mismatch "
+                f"(sent {len(items)} ids, received {len(raw_results)})"
+            )
+        by_id = {
+            str(entry.get("custom_id")): entry
+            for entry in raw_results
+            if entry.get("custom_id") not in (None, "")
+        }
+        use_sparse = lines[0]["body"].get("return_sparse") is True
+        out: list[Embedding | BaseException] = []
+        for i in range(len(items)):
+            entry = by_id.get(str(i))
+            if entry is None:
+                err: BaseException = OpenAIBatchError(f"Batch: missing custom_id for id={i}")
+                if not return_exceptions:
+                    raise err
+                out.append(err)
+                continue
+            parsed, err = self._map_embedding_entry(entry, i, sparse=use_sparse)
+            if err is not None:
+                if not return_exceptions:
+                    raise err
+                out.append(err)
+            else:
+                assert parsed is not None
+                out.append(parsed)
+        return out
+
+    @staticmethod
+    def _map_embedding_entry(
+        entry: dict[str, Any], index: int, *, sparse: bool,
+    ) -> tuple[Any, BaseException | None]:
+        from llm_mesh.embeddings import parse_embedding_response
+
+        top_error = entry.get("error")
+        if top_error:
+            return None, OpenAIBatchError(f"Batch subtask id={index}: {top_error}")
+        response_obj = entry.get("response")
+        if not isinstance(response_obj, dict):
+            return None, OpenAIBatchError(
+                f"Batch subtask id={index}: missing response object"
+            )
+        status_code = response_obj.get("status_code")
+        if status_code != 200:
+            return None, OpenAIBatchError(
+                f"Batch subtask id={index}: response status {status_code} — "
+                f"{response_obj.get('body')}"
+            )
+        body = response_obj.get("body")
+        if not isinstance(body, dict):
+            return None, OpenAIBatchError(
+                f"Batch subtask id={index}: response body is not an object"
+            )
+        try:
+            parsed = parse_embedding_response(body, 1, sparse=sparse)
+        except (LLMError, KeyError, TypeError, ValueError) as exc:
+            return None, OpenAIBatchError(f"Batch subtask id={index}: {exc}")
+        return parsed[0], None
