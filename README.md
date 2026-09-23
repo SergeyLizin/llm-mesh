@@ -82,7 +82,7 @@ OpenAI has no `count_tokens`. Anthropic posts each string to `/v1/messages/count
 | --- | --- | --- | --- | --- |
 | Class | `OpenAIClient` | `AnthropicClient` | `GeminiClient` | `GigaChatAsyncClient` |
 | Default endpoint | `LLM_BASE_URL` (required) | `https://api.anthropic.com` | `https://generativelanguage.googleapis.com/v1beta` | `https://gigachat.devices.sberbank.ru/api/v1` |
-| API key | `LLM_API_KEY` | `ANTHROPIC_API_KEY`, then `LLM_API_KEY` | `GEMINI_API_KEY`, then `LLM_API_KEY` | OAuth client credentials in `LLM_API_KEY`, or a `token` |
+| API key | `LLM_API_KEY` | `LLM_API_KEY` | `LLM_API_KEY` | OAuth client credentials in `LLM_API_KEY`, or a `token` |
 | Structured output | tools, then declared `response_format` | native tool use and `output_config.format` | `responseSchema` and function calling | legacy functions and native JSON Schema |
 | `count_tokens` | no | yes | yes | yes |
 | Batch | yes | no | no | yes |
@@ -201,10 +201,8 @@ Constructor arguments override the environment, except `length_retry_cap`, where
 
 | Variable | Used by |
 | --- | --- |
-| `LLM_API_KEY` | all four; Anthropic and Gemini check their own variable first |
-| `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` | Anthropic, before the `LLM_` names |
-| `GEMINI_API_KEY`, `GEMINI_BASE_URL` | Gemini, before the `LLM_` names |
-| `LLM_BASE_URL` | OpenAI (required), and the others when their own base URL is unset |
+| `LLM_API_KEY` | all four providers |
+| `LLM_BASE_URL` | OpenAI (required). Anthropic, Gemini, and GigaChat use it when set, and otherwise their public endpoint |
 | `LLM_AUTH_URL`, `LLM_AUTH_SCOPE` | GigaChat OAuth. Default auth URL is `https://ngw.devices.sberbank.ru:9443/api/v2/oauth`. No default scope |
 | `LLM_VERIFY_SSL` | `0`, `false`, or `no` disables TLS verification |
 

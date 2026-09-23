@@ -3018,7 +3018,7 @@
       {
         "name": "anthropic",
         "model": "claude-opus-5",
-        "api_key_env": "ANTHROPIC_API_KEY"
+        "api_key_env": "LLM_API_KEY"
       }
     ],
     "notes": "Anthropic Messages API. The endpoint defaults to https://api.anthropic.com; set base_url or base_url_env on the route to use a proxy. OpenAI-compatible gateways keep their own catalog ids."
@@ -3031,7 +3031,7 @@
       {
         "name": "anthropic",
         "model": "claude-sonnet-4-6",
-        "api_key_env": "ANTHROPIC_API_KEY"
+        "api_key_env": "LLM_API_KEY"
       }
     ],
     "notes": "Anthropic Messages API. The endpoint defaults to https://api.anthropic.com; set base_url or base_url_env on the route to use a proxy."
@@ -3044,7 +3044,7 @@
       {
         "name": "anthropic",
         "model": "claude-haiku-4-5-20251001",
-        "api_key_env": "ANTHROPIC_API_KEY"
+        "api_key_env": "LLM_API_KEY"
       }
     ],
     "notes": "Anthropic Messages API. The endpoint defaults to https://api.anthropic.com; set base_url or base_url_env on the route to use a proxy."
@@ -3057,7 +3057,7 @@
       {
         "name": "google",
         "model": "gemini-2.5-flash",
-        "api_key_env": "GEMINI_API_KEY"
+        "api_key_env": "LLM_API_KEY"
       }
     ],
     "notes": "Native generateContent API. The endpoint defaults to https://generativelanguage.googleapis.com/v1beta. OpenAI-compatible Gemini proxies keep their own catalog ids and kind openai."

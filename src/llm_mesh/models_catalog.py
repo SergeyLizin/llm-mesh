@@ -226,10 +226,8 @@ def missing_credentials(route: dict) -> list[str]:
         return missing
     if route.get("kind") in ("anthropic", "gemini"):
         # Both APIs have a fixed default endpoint, so a base URL is optional.
-        # Gemini's default key name is GEMINI_API_KEY; Anthropic's is ANTHROPIC_API_KEY.
-        key_name = route.get("api_key_env") or (
-            "GEMINI_API_KEY" if route.get("kind") == "gemini" else "ANTHROPIC_API_KEY"
-        )
+        # The key is the same neutral variable as every other kind.
+        key_name = route.get("api_key_env") or "LLM_API_KEY"
         if not (route.get("api_key") or _env(key_name)):
             missing.append(key_name)
         if not route_model(route) and route.get("model_env"):

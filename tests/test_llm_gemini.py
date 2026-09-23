@@ -84,9 +84,8 @@ def test_url_keeps_a_versioned_base_and_adds_v1beta():
 
 
 def test_missing_key_names_the_variables(monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("LLM_API_KEY", raising=False)
-    with pytest.raises(GeminiError, match="GEMINI_API_KEY"):
+    with pytest.raises(GeminiError, match="LLM_API_KEY"):
         GeminiClient(model=MODEL, base_url=BASE)
 
 
@@ -411,16 +410,17 @@ async def test_probe_counts_tokens():
 
 
 def test_catalog_route_defaults_the_endpoint(monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
     route = {
         "id": "gemini-25-flash",
         "kind": "gemini",
         "model": MODEL,
         "provider": "google",
-        "api_key_env": "GEMINI_API_KEY",
+        "api_key_env": "LLM_API_KEY",
     }
-    assert missing_credentials(route) == ["GEMINI_API_KEY"]
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    assert missing_credentials(route) == ["LLM_API_KEY"]
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
     client = make_client(route)
     assert isinstance(client, GeminiClient)
     assert client._model == MODEL

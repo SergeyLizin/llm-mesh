@@ -77,7 +77,7 @@ def _sse(events: list[dict]) -> str:
 
 @pytest.fixture
 def clean_managed(monkeypatch):
-    for key in (*_MANAGED_ENV, "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
+    for key in _MANAGED_ENV:
         monkeypatch.delenv(key, raising=False)
 
 
@@ -140,18 +140,16 @@ def test_messages_alternate_roles_and_translate_tool_turns():
 
 
 def test_missing_api_key_is_reported(clean_managed):
-    with pytest.raises(AnthropicError, match="ANTHROPIC_API_KEY"):
+    with pytest.raises(AnthropicError, match="LLM_API_KEY"):
         AnthropicClient(model="claude-sonnet-5")
 
 
-def test_dedicated_key_and_base_url_precede_neutral_names(monkeypatch, clean_managed):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
-    monkeypatch.setenv("LLM_API_KEY", "other-key")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://anthropic.example/v1")
-    monkeypatch.setenv("LLM_BASE_URL", "https://other.example/v1")
+def test_key_and_base_url_come_from_the_neutral_environment(monkeypatch, clean_managed):
+    monkeypatch.setenv("LLM_API_KEY", "neutral-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://neutral.example/v1")
     client = AnthropicClient(model="claude-sonnet-5")
-    assert client._key == "anthropic-key"
-    assert client.URL == "https://anthropic.example/v1/messages"
+    assert client._key == "neutral-key"
+    assert client.URL == "https://neutral.example/v1/messages"
 
 
 @pytest.mark.asyncio
@@ -740,10 +738,10 @@ def test_catalog_anthropic_route_does_not_require_a_base_url(monkeypatch, clean_
         "kind": "anthropic",
         "model": "claude-sonnet-5",
         "provider": "anthropic",
-        "api_key_env": "ANTHROPIC_API_KEY",
+        "api_key_env": "LLM_API_KEY",
     }
-    assert missing_credentials(route) == ["ANTHROPIC_API_KEY"]
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    assert missing_credentials(route) == ["LLM_API_KEY"]
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
     assert missing_credentials(route) == []
     client = make_client(route)
     assert isinstance(client, AnthropicClient)

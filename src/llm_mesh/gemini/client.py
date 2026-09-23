@@ -395,9 +395,9 @@ def build_contents(request: LLMRequest) -> tuple[str, list[dict[str, Any]]]:
 class GeminiClient(BaseLLMClient):
     """Gemini generateContent client.
 
-    ``GEMINI_API_KEY`` is read before ``LLM_API_KEY``. An omitted base URL
-    is ``GEMINI_BASE_URL``, then ``LLM_BASE_URL``, then the public
-    Generative Language endpoint. ``fallback_policy="preserve"`` and
+    An omitted key is read from ``LLM_API_KEY``. An omitted base URL is
+    read from ``LLM_BASE_URL``, then the public Generative Language
+    endpoint. ``fallback_policy="preserve"`` and
     ``no_degrade`` refuse salvage of JSON Schema text and a silent retry
     after a schema rejection. The default policy is ``"recover"``.
     """
@@ -431,19 +431,13 @@ class GeminiClient(BaseLLMClient):
     ) -> None:
         if fallback_policy not in ("recover", "preserve"):
             raise ValueError("fallback_policy must be 'recover' or 'preserve'")
-        self._base = (
-            base_url
-            or get_env("GEMINI_BASE_URL")
-            or get_env("LLM_BASE_URL")
-            or GEMINI_BASE_URL
-        )
+        self._base = base_url or get_env("LLM_BASE_URL") or GEMINI_BASE_URL
         self.PROVIDER = label or get_env("LLM_PROVIDER_LABEL") or "gemini"
         self._model = model or get_env("LLM_MODEL")
-        self._key = api_key or get_env("GEMINI_API_KEY") or get_env("LLM_API_KEY")
+        self._key = api_key or get_env("LLM_API_KEY")
         if not self._key:
             raise GeminiError(
-                f"{self.PROVIDER}: missing API key "
-                "(GEMINI_API_KEY/LLM_API_KEY are not set)"
+                f"{self.PROVIDER}: missing API key (LLM_API_KEY is not set)"
             )
         self._extra_headers = dict(extra_headers or {})
         parsed_headers = _parse_json_dict_env(

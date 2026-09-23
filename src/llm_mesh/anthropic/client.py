@@ -381,9 +381,8 @@ class AnthropicClient(BaseLLMClient):
     """Messages API client for text, streaming, and structured output.
 
     ``api_key`` authenticates with ``x-api-key``. An omitted key is read from
-    ``ANTHROPIC_API_KEY``, then ``LLM_API_KEY``. An omitted ``base_url`` is
-    read from ``ANTHROPIC_BASE_URL``, then ``LLM_BASE_URL``, then the public
-    Anthropic endpoint. ``fallback_policy="preserve"`` returns provider
+    ``LLM_API_KEY``. An omitted ``base_url`` is read from ``LLM_BASE_URL``,
+    then the public Anthropic endpoint. ``fallback_policy="preserve"`` returns provider
     failures instead of emulating structured output as text. The default is
     ``"recover"``.
     """
@@ -427,20 +426,14 @@ class AnthropicClient(BaseLLMClient):
         if fallback_policy not in ("recover", "preserve"):
             raise ValueError("fallback_policy must be 'recover' or 'preserve'")
         self._preserve_responses = fallback_policy == "preserve"
-        base = (
-            base_url
-            or get_env("ANTHROPIC_BASE_URL")
-            or get_env("LLM_BASE_URL")
-            or ANTHROPIC_BASE_URL
-        )
+        base = base_url or get_env("LLM_BASE_URL") or ANTHROPIC_BASE_URL
         self.URL = messages_url(base)
         self.PROVIDER = label or get_env("LLM_PROVIDER_LABEL") or "anthropic"
         self._model = model or get_env("LLM_MODEL")
-        self._key = api_key or get_env("ANTHROPIC_API_KEY") or get_env("LLM_API_KEY")
+        self._key = api_key or get_env("LLM_API_KEY")
         if not self._key:
             raise AnthropicError(
-                f"{self.PROVIDER}: missing API key "
-                "(ANTHROPIC_API_KEY/LLM_API_KEY are not set)"
+                f"{self.PROVIDER}: missing API key (LLM_API_KEY is not set)"
             )
         self._version = anthropic_version
         self._extra_headers = dict(extra_headers or {})
