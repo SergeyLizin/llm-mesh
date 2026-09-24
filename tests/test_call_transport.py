@@ -9,7 +9,7 @@ import pytest
 import respx
 
 from llm_mesh import LLMRequest, LLMValidationError, OpenAIClient
-from llm_mesh.gigachat.client import GIGACHAT_BASE_URL, GigaChatAsyncClient
+from llm_mesh.gigachat.client import GIGACHAT_BASE_URL, GigaChatClient
 
 URL = "https://host/v1/chat/completions"
 
@@ -50,7 +50,7 @@ async def test_gigachat_per_call_timeout_keeps_connect_split():
     route = respx.post(f"{GIGACHAT_BASE_URL}/chat/completions").mock(
         return_value=httpx.Response(200, json=_ok()),
     )
-    client = GigaChatAsyncClient(token="dummy", model="GigaChat", timeout_s=1.0)
+    client = GigaChatClient(token="dummy", model="GigaChat", timeout_s=1.0)
     try:
         await client.generate_text(_request(timeout_s=12.5))
     finally:

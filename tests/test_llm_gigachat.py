@@ -12,7 +12,7 @@ import respx
 from llm_mesh.gigachat.client import (
     GIGACHAT_BASE_URL,
     GIGACHAT_AUTH_URL,
-    GigaChatAsyncClient,
+    GigaChatClient,
 )
 from llm_mesh.types import (
     LLMAuthError,
@@ -69,12 +69,12 @@ def _ok_chat_response(args: dict, model: str = "GigaChat") -> dict:
 
 def test_no_credentials_raises():
     with pytest.raises(LLMAuthError):
-        GigaChatAsyncClient(credentials=None, token=None)
+        GigaChatClient(credentials=None, token=None)
 
 
 def test_token_short_circuit_skips_oauth(monkeypatch):
     """An explicitly supplied token skips OAuth."""
-    client = GigaChatAsyncClient(token="pre-baked")
+    client = GigaChatClient(token="pre-baked")
 
     async def run():
         with respx.mock(base_url=GIGACHAT_BASE_URL) as mock:
@@ -103,7 +103,7 @@ def test_oauth_success_then_chat():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS, scope="GIGACHAT_API_CORP")
+        client = GigaChatClient(credentials=CREDS, scope="GIGACHAT_API_CORP")
         resp = await client.generate_structured(_request())
         await client.aclose()
         return resp
@@ -139,7 +139,7 @@ def test_oauth_scope_fallback():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)  # No explicit scope: use the fallback list.
+        client = GigaChatClient(credentials=CREDS)  # No explicit scope: use the fallback list.
         resp = await client.generate_structured(_request())
         await client.aclose()
         return resp
@@ -156,7 +156,7 @@ def test_oauth_all_fail():
     respx.post(GIGACHAT_AUTH_URL).mock(return_value=httpx.Response(403, text="forbidden"))
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         with pytest.raises(LLMAuthError, match="last=403"):
             await client.generate_structured(_request())
         await client.aclose()
@@ -183,7 +183,7 @@ def test_oauth_403_dns_blip_retries_within_scope():
         original_sleep = _aio.sleep
         _aio.sleep = lambda *a, **kw: original_sleep(0)
         try:
-            client = GigaChatAsyncClient(credentials=CREDS)
+            client = GigaChatClient(credentials=CREDS)
             resp = await client.generate_structured(_request())
             await client.aclose()
             return resp
@@ -218,7 +218,7 @@ def test_oauth_504_gateway_timeout_retries_within_scope():
         original_sleep = _aio.sleep
         _aio.sleep = lambda *a, **kw: original_sleep(0)
         try:
-            client = GigaChatAsyncClient(credentials=CREDS, scope="GIGACHAT_API_CORP")
+            client = GigaChatClient(credentials=CREDS, scope="GIGACHAT_API_CORP")
             resp = await client.generate_structured(_request())
             await client.aclose()
             return resp
@@ -248,7 +248,7 @@ def test_oauth_503_then_502_then_success():
         original_sleep = _aio.sleep
         _aio.sleep = lambda *a, **kw: original_sleep(0)
         try:
-            client = GigaChatAsyncClient(credentials=CREDS, scope="GIGACHAT_API_CORP")
+            client = GigaChatClient(credentials=CREDS, scope="GIGACHAT_API_CORP")
             resp = await client.generate_structured(_request())
             await client.aclose()
             return resp
@@ -279,7 +279,7 @@ def test_chat_401_triggers_refresh_then_retry():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         resp = await client.generate_structured(_request())
         await client.aclose()
         return resp
@@ -301,7 +301,7 @@ def test_chat_401_after_refresh_raises():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         with pytest.raises(LLMAuthError, match="after refresh"):
             await client.generate_structured(_request())
         await client.aclose()
@@ -328,7 +328,7 @@ def test_no_function_call_raises_validation():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         with pytest.raises(LLMValidationError, match="function_call"):
             await client.generate_structured(_request())
         await client.aclose()
@@ -357,7 +357,7 @@ def test_no_function_call_retries_and_succeeds():
     respx.post(f"{GIGACHAT_BASE_URL}/chat/completions").mock(side_effect=lambda _r: next(responses))
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         result = await client.generate_structured(_request())
         assert result.arguments == {"x": "1"}
         await client.aclose()
@@ -391,7 +391,7 @@ def test_arguments_as_dict_supported():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         resp = await client.generate_structured(_request())
         await client.aclose()
         return resp
@@ -425,7 +425,7 @@ def test_invalid_json_in_arguments_raises():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         with pytest.raises(LLMValidationError, match="invalid JSON"):
             await client.generate_structured(_request())
         await client.aclose()
@@ -443,7 +443,7 @@ def test_5xx_propagates_as_llmerror():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         # After retries are exhausted, the message reports a generic 5xx retry failure rather
         # than the original 503 status.
         with pytest.raises(LLMError, match="5xx"):
@@ -467,7 +467,7 @@ def test_reasoning_effort_sent_in_structured_body():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS, model="GigaChat-2-Max")
+        client = GigaChatClient(credentials=CREDS, model="GigaChat-2-Max")
         req = _request()
         req = req.model_copy(update={"reasoning_effort": "high"})
         await client.generate_structured(req)
@@ -489,7 +489,7 @@ def test_reasoning_effort_from_env(monkeypatch):
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         await client.generate_structured(_request())
         await client.aclose()
 
@@ -509,7 +509,7 @@ def test_reasoning_effort_invalid_value_not_sent(monkeypatch):
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         await client.generate_structured(_request())
         await client.aclose()
 
@@ -533,7 +533,7 @@ def test_reasoning_content_and_request_id_parsed():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         resp = await client.generate_structured(_request())
         await client.aclose()
         return resp
@@ -554,7 +554,7 @@ def test_request_id_falls_back_to_rquid_when_no_header():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         resp = await client.generate_structured(_request())
         await client.aclose()
         return resp
@@ -593,7 +593,7 @@ def test_generate_stream_yields_text_deltas():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         chunks = []
         async for c in client.generate_stream(
             LLMRequest(system="s", user="u", mode="text")
@@ -625,7 +625,7 @@ def test_generate_stream_yields_reasoning_deltas():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         reasoning, content = "", ""
         async for c in client.generate_stream(
             LLMRequest(system="s", user="u", mode="text", reasoning_effort="high")
@@ -656,7 +656,7 @@ def test_generate_stream_401_refreshes_token():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         out = ""
         async for c in client.generate_stream(
             LLMRequest(system="s", user="u", mode="text")
@@ -708,7 +708,7 @@ def test_proactive_refresh_before_expiry():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         await client.generate_structured(_request())  # Fetch the expired tok-stale token explicitly.
         await client.generate_structured(_request())  # Proactive refresh yields tok-fresh.
         await client.aclose()
@@ -731,7 +731,7 @@ def test_no_proactive_refresh_when_token_valid():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         await client.generate_structured(_request())
         await client.generate_structured(_request())
         await client.aclose()
@@ -742,7 +742,7 @@ def test_no_proactive_refresh_when_token_valid():
 
 def test_static_token_never_proactively_refreshed():
     """An explicit static token with no expiry is never proactively refreshed."""
-    client = GigaChatAsyncClient(token="static")
+    client = GigaChatClient(token="static")
     assert client._token_expired() is False  # An absent expiry does not count as expired.
 
 
@@ -768,7 +768,7 @@ def test_chat_500_retried_then_success():
         orig = _aio.sleep
         _aio.sleep = lambda *a, **k: orig(0)
         try:
-            client = GigaChatAsyncClient(credentials=CREDS)
+            client = GigaChatClient(credentials=CREDS)
             resp = await client.generate_structured(_request())
             await client.aclose()
             return resp
@@ -802,7 +802,7 @@ def test_chat_429_retried_honoring_retry_after():
             return await orig(0)
         _aio.sleep = _capture
         try:
-            client = GigaChatAsyncClient(credentials=CREDS)
+            client = GigaChatClient(credentials=CREDS)
             resp = await client.generate_structured(_request())
             await client.aclose()
             return resp
@@ -851,7 +851,7 @@ def test_stream_canary_scans_partial_on_error(monkeypatch):
         def stream(self, method, url, **kw): return _FakeStreamResp()
 
     async def run():
-        client = GigaChatAsyncClient(token="t")
+        client = GigaChatClient(token="t")
         client._client = _FakeClient()  # type: ignore[assignment]
         got = []
         with pytest.raises(_gc.LLMTimeoutError):
@@ -892,7 +892,7 @@ def test_stream_canary_scans_on_early_consumer_break(monkeypatch):
         def stream(self, method, url, **kw): return _FakeStreamResp()
 
     async def run():
-        client = GigaChatAsyncClient(token="t")
+        client = GigaChatClient(token="t")
         client._client = _FakeClient()  # type: ignore[assignment]
         async for c in client.generate_stream(
             LLMRequest(system="s", user="u", mode="text")
@@ -953,7 +953,7 @@ def test_length_retry_doubles_max_tokens_then_succeeds():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS, model="GigaChat-2-Max")
+        client = GigaChatClient(credentials=CREDS, model="GigaChat-2-Max")
         resp = await client.generate_structured(
             _request().model_copy(update={"max_tokens": 4096})
         )
@@ -982,7 +982,7 @@ def test_length_retry_noop_when_at_model_cap():
 
     async def run():
         # Request the configured Pro ceiling of 8192; no growth is possible.
-        client = GigaChatAsyncClient(credentials=CREDS, model="GigaChat-2-Pro")
+        client = GigaChatClient(credentials=CREDS, model="GigaChat-2-Pro")
         resp = await client.generate_structured(
             _request().model_copy(update={"max_tokens": 8192})
         )
@@ -1008,7 +1008,7 @@ def test_length_retry_disabled_via_env(monkeypatch):
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS, model="GigaChat-2-Max")
+        client = GigaChatClient(credentials=CREDS, model="GigaChat-2-Max")
         await client.generate_structured(_request().model_copy(update={"max_tokens": 4096}))
         await client.aclose()
 
@@ -1037,7 +1037,7 @@ def test_length_retry_skipped_on_degenerate_text(monkeypatch):
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS, model="GigaChat-2-Max")
+        client = GigaChatClient(credentials=CREDS, model="GigaChat-2-Max")
         req = _request().model_copy(update={"max_tokens": 4096, "mode": "text"})
         await client.generate_text(req)
         await client.aclose()
@@ -1053,21 +1053,21 @@ def test_length_retry_skipped_on_degenerate_text(monkeypatch):
 
 
 def test_max_tokens_clip_to_pro_limit_8k():
-    client = GigaChatAsyncClient(token="t", model="GigaChat-2-Pro")
+    client = GigaChatClient(token="t", model="GigaChat-2-Pro")
     assert client._clip_max_tokens(4096) == 4096  # Within the limit.
     assert client._clip_max_tokens(8192) == 8192  # Exactly at the limit.
     assert client._clip_max_tokens(16384) == 8192  # Clip to the limit.
 
 
 def test_max_tokens_clip_to_max_limit_16k():
-    client = GigaChatAsyncClient(token="t", model="GigaChat-2-Max")
+    client = GigaChatClient(token="t", model="GigaChat-2-Max")
     assert client._clip_max_tokens(8192) == 8192
     assert client._clip_max_tokens(16384) == 16384  # Exactly at the limit.
     assert client._clip_max_tokens(32768) == 16384
 
 
 def test_max_tokens_unknown_model_falls_back_to_default():
-    client = GigaChatAsyncClient(token="t", model="GigaChat-Mystery")
+    client = GigaChatClient(token="t", model="GigaChat-Mystery")
     # The default output limit is 4096.
     assert client._clip_max_tokens(2048) == 2048
     assert client._clip_max_tokens(16384) == 4096
@@ -1084,12 +1084,12 @@ def test_max_tokens_clip_warns_once_per_model_across_instances(caplog):
     with caplog.at_level(_logging.WARNING, logger="llm_mesh.gigachat.client"):
         # Three separate instances clip the same model's budget.
         for _ in range(3):
-            GigaChatAsyncClient(token="t", model="GigaChat-2")._clip_max_tokens(8192)
+            GigaChatClient(token="t", model="GigaChat-2")._clip_max_tokens(8192)
     clips = [r for r in caplog.records if "exceeds per-model limit" in r.message]
     assert len(clips) == 1  # Emit one warning per model, not one per instance.
     assert "GigaChat-2" in _gc._MAX_TOKENS_CLIP_WARNED
     # Clipping still produces the correct limit.
-    assert GigaChatAsyncClient(token="t", model="GigaChat-2")._clip_max_tokens(8192) == 4096
+    assert GigaChatClient(token="t", model="GigaChat-2")._clip_max_tokens(8192) == 4096
 
 
 def test_max_tokens_warns_only_once(caplog):
@@ -1098,7 +1098,7 @@ def test_max_tokens_warns_only_once(caplog):
     # Clear this model's process-wide warning cache to keep the test independent of execution
     # order.
     _gc._MAX_TOKENS_CLIP_WARNED.discard("GigaChat-2-Pro")
-    client = GigaChatAsyncClient(token="t", model="GigaChat-2-Pro")
+    client = GigaChatClient(token="t", model="GigaChat-2-Pro")
     with caplog.at_level(logging.WARNING, logger="llm_mesh.gigachat.client"):
         client._clip_max_tokens(16384)
         client._clip_max_tokens(20000)
@@ -1113,7 +1113,7 @@ def test_max_tokens_warns_only_once(caplog):
 def test_concurrency_default_no_limit(monkeypatch):
     """Leave concurrency unlimited without an argument or environment setting."""
     monkeypatch.delenv("LLM_MAX_CONCURRENT", raising=False)
-    client = GigaChatAsyncClient(token="t")
+    client = GigaChatClient(token="t")
     assert client._max_concurrent is None
     assert client._semaphore is None
     assert client._ensure_semaphore() is None
@@ -1121,7 +1121,7 @@ def test_concurrency_default_no_limit(monkeypatch):
 
 def test_concurrency_explicit_arg_creates_semaphore_lazily():
     """Store max_concurrent immediately but create its semaphore lazily."""
-    client = GigaChatAsyncClient(token="t", max_concurrent=3)
+    client = GigaChatClient(token="t", max_concurrent=3)
     assert client._max_concurrent == 3
     assert client._semaphore is None  # No event loop is required during construction.
 
@@ -1136,26 +1136,26 @@ def test_concurrency_explicit_arg_creates_semaphore_lazily():
 
 def test_concurrency_env_var_respected(monkeypatch):
     monkeypatch.setenv("LLM_MAX_CONCURRENT", "5")
-    client = GigaChatAsyncClient(token="t")
+    client = GigaChatClient(token="t")
     assert client._max_concurrent == 5
 
 
 @pytest.mark.parametrize("bad", ["", "0", "-1", "abc", " "])
 def test_concurrency_env_var_invalid_falls_back_to_none(monkeypatch, bad):
     monkeypatch.setenv("LLM_MAX_CONCURRENT", bad)
-    client = GigaChatAsyncClient(token="t")
+    client = GigaChatClient(token="t")
     assert client._max_concurrent is None
 
 
 def test_concurrency_explicit_arg_overrides_env(monkeypatch):
     monkeypatch.setenv("LLM_MAX_CONCURRENT", "10")
-    client = GigaChatAsyncClient(token="t", max_concurrent=2)
+    client = GigaChatClient(token="t", max_concurrent=2)
     assert client._max_concurrent == 2
 
 
 def test_concurrency_limits_inflight_requests():
     """With max_concurrent=2, allow at most two requests in flight."""
-    client = GigaChatAsyncClient(token="t", max_concurrent=2)
+    client = GigaChatClient(token="t", max_concurrent=2)
 
     inflight = 0
     peak = 0
@@ -1188,7 +1188,7 @@ def test_concurrency_limits_inflight_requests():
 
 def test_disable_reasoning_flag_off_by_default():
     """Without LLM_DISABLE_REASONING, preserve the body and requested reasoning effort."""
-    client = GigaChatAsyncClient(token="t")
+    client = GigaChatClient(token="t")
     assert client._disable_reasoning is False
     body: dict = {}
     client._apply_reasoning_disable(body)
@@ -1202,7 +1202,7 @@ def test_disable_reasoning_flag_off_by_default():
 def test_disable_reasoning_flag_on(monkeypatch):
     """Disabling reasoning adds enable_thinking=false and suppresses reasoning_effort."""
     monkeypatch.setenv("LLM_DISABLE_REASONING", "true")
-    client = GigaChatAsyncClient(token="t")
+    client = GigaChatClient(token="t")
     assert client._disable_reasoning is True
     body: dict = {}
     client._apply_reasoning_disable(body)
@@ -1216,7 +1216,7 @@ def test_disable_reasoning_flag_on(monkeypatch):
 def test_disable_reasoning_preserves_existing_kwargs(monkeypatch):
     """Merge enable_thinking without erasing other chat_template_kwargs."""
     monkeypatch.setenv("LLM_DISABLE_REASONING", "1")
-    client = GigaChatAsyncClient(token="t")
+    client = GigaChatClient(token="t")
     body: dict = {"chat_template_kwargs": {"foo": 1}}
     client._apply_reasoning_disable(body)
     assert body == {"chat_template_kwargs": {"foo": 1, "enable_thinking": False}}
@@ -1230,7 +1230,7 @@ async def test_tools_required_rejected_honestly():
     """Reject tools_required instead of silently forcing a single function. Legacy function calls
     cannot satisfy the native loop contract; the caller must explicitly choose text emulation.
     """
-    client = GigaChatAsyncClient(token="t")
+    client = GigaChatClient(token="t")
     req = _request()
     object.__setattr__(req, "tools", [{"name": "finish", "parameters": {}}])
     object.__setattr__(req, "tools_required", True)
@@ -1241,7 +1241,7 @@ async def test_tools_required_rejected_honestly():
 
 def test_tool_turns_dropped_from_legacy_body():
     """Do not send the unsupported tool role through the production legacy wire format."""
-    client = GigaChatAsyncClient(token="t")
+    client = GigaChatClient(token="t")
     req = _request()
     object.__setattr__(req, "history", [
         {"role": "user", "content": "OLD-Q"},
@@ -1283,7 +1283,7 @@ def test_finish_reason_propagated_structured(reason):
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS, scope="GIGACHAT_API_CORP")
+        client = GigaChatClient(credentials=CREDS, scope="GIGACHAT_API_CORP")
         resp = await client.generate_structured(_request())
         await client.aclose()
         return resp
@@ -1302,7 +1302,7 @@ def test_finish_reason_propagated_text():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS, scope="GIGACHAT_API_CORP")
+        client = GigaChatClient(credentials=CREDS, scope="GIGACHAT_API_CORP")
         resp = await client.generate_text(
             LLMRequest(system="s", user="u", mode="text", length_retry=False)
         )
@@ -1325,7 +1325,7 @@ def test_finish_reason_absent_is_none():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS, scope="GIGACHAT_API_CORP")
+        client = GigaChatClient(credentials=CREDS, scope="GIGACHAT_API_CORP")
         resp = await client.generate_structured(_request())
         await client.aclose()
         return resp
@@ -1343,7 +1343,7 @@ async def test_rejected_structured_response_is_available_only_in_debug(caplog, m
     payload = _ok_chat_response({})
     raw_arguments = '{"name": "' + 'x' * 500 + 'END_OF_RAW'
     payload['choices'][0]['message']['function_call']['arguments'] = raw_arguments
-    client = GigaChatAsyncClient(credentials=CREDS)
+    client = GigaChatClient(credentials=CREDS)
     monkeypatch.setattr(client, '_post_chat_with_length_retry', AsyncMock(return_value=(payload, 'request-probe')))
     try:
         with pytest.raises(LLMValidationError, match='invalid JSON'):

@@ -59,7 +59,7 @@ from llm_mesh.rerank import LocalCrossEncoder, RerankHit
 from .openai import OpenAIClient
 from .anthropic import AnthropicClient, AnthropicError
 from .gemini import GeminiClient, GeminiError
-from .gigachat import GigaChatAsyncClient
+from .gigachat import GigaChatAsyncClient, GigaChatClient
 from .types import LLMUsage, LLMStreamChunk
 
 from importlib.metadata import version
@@ -71,7 +71,8 @@ __all__ += [
     "GeminiClient",
     "GeminiError",
     "OpenAIClient",
-    "GigaChatAsyncClient",
+    "GigaChatClient",
+    "GigaChatAsyncClient",  # Deprecated alias; removed in 3.0.0.
     "LLMUsage",
     "LLMStreamChunk",
 ]

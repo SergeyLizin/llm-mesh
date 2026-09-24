@@ -16,7 +16,7 @@ from llm_mesh import (
     AnthropicClient,
     Budget,
     GeminiClient,
-    GigaChatAsyncClient,
+    GigaChatClient,
     LLMRequest,
     LLMUsage,
     LLMValidationError,
@@ -303,7 +303,7 @@ async def test_gigachat_does_not_reask_invalid_arguments():
             "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
         }),
     )
-    client = GigaChatAsyncClient(token="dummy", model="GigaChat")
+    client = GigaChatClient(token="dummy", model="GigaChat")
     try:
         response = await client.generate_structured(_request())
     finally:

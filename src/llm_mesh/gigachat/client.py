@@ -143,7 +143,7 @@ def _resolve_credentials(explicit: str | None) -> str | None:
 
 
 
-class GigaChatAsyncClient(BaseLLMClient):
+class GigaChatClient(BaseLLMClient):
     """Async GigaChat client supporting structured output through legacy function calling.
 
     The instance model is the default. ``LLMRequest.model`` overrides it for
@@ -311,7 +311,7 @@ class GigaChatAsyncClient(BaseLLMClient):
         """
         return httpx.Timeout(seconds, connect=30.0)
 
-    async def __aenter__(self) -> GigaChatAsyncClient:
+    async def __aenter__(self) -> GigaChatClient:
         # Reuse an already opened transport. Replacing it here used to drop
         # the previous client without closing it.
         self._ensure_http()
@@ -1718,3 +1718,8 @@ class GigaChatAsyncClient(BaseLLMClient):
         if request.user:
             messages.append({"role": "user", "content": request.user})
         return messages
+
+
+# Deprecated alias, kept for the 2.x line and removed in 3.0.0. The async
+# prefix said nothing: every client in the package is async.
+GigaChatAsyncClient = GigaChatClient

@@ -10,7 +10,7 @@ import pytest
 import respx
 
 from llm_mesh.gigachat.batch import GigaChatBatchClient
-from llm_mesh.gigachat.client import GIGACHAT_BASE_URL, GigaChatAsyncClient
+from llm_mesh.gigachat.client import GIGACHAT_BASE_URL, GigaChatClient
 from llm_mesh.openai.client import OpenAIClient, chat_completions_url
 from llm_mesh.types import LLMRequest
 
@@ -147,7 +147,7 @@ def test_openai_route_id_follows_the_request_without_replacing_the_client():
 @respx.mock
 async def test_gigachat_override_changes_model_and_token_ceiling():
     route = respx.post(GIGA_CHAT).respond(200, json=_chat(model="GigaChat-2-Max"))
-    client = GigaChatAsyncClient(token="t", model="GigaChat")
+    client = GigaChatClient(token="t", model="GigaChat")
     try:
         await client.generate_text(
             _text(model="GigaChat-2-Max", max_tokens=20000, length_retry=False)
@@ -177,7 +177,7 @@ async def test_gigachat_length_retry_without_a_ceiling_does_not_raise(monkeypatc
         return httpx.Response(200, json=_chat(content="partial answer", finish=finish))
 
     respx.post(GIGA_CHAT).mock(side_effect=reply)
-    client = GigaChatAsyncClient(
+    client = GigaChatClient(
         token="t", model="GigaChat", use_model_token_limits=False,
     )
     try:

@@ -54,7 +54,7 @@ def _make_request(*, mode: str = "function_call", schema: dict | None = None) ->
 
 async def _make_client_async(**kwargs):
     """Construct a GigaChat client inside a coroutine."""
-    from llm_mesh.gigachat.client import GigaChatAsyncClient as GigaChatClient
+    from llm_mesh.gigachat.client import GigaChatClient as GigaChatClient
     for k in list(os.environ):
         if k.startswith("GIGACHAT_") or k.startswith("GIGAPERS_") or k.startswith("GIGACORP_"):
             os.environ.pop(k, None)
@@ -499,7 +499,7 @@ class TestParseJsonContentHelper:
         ('[1, 2, 3]', None),  # An array is not an object; return None.
     ])
     def test_variants(self, content, expected):
-        from llm_mesh.gigachat.client import GigaChatAsyncClient as GigaChatClient
+        from llm_mesh.gigachat.client import GigaChatClient as GigaChatClient
         assert GigaChatClient._parse_json_content(content) == expected
 
 
@@ -570,8 +570,8 @@ def test_extra_body_and_headers_are_sent_on_generate_text(monkeypatch):
     })
 
     async def go():
-        from llm_mesh.gigachat.client import GigaChatAsyncClient
-        client = GigaChatAsyncClient(
+        from llm_mesh.gigachat.client import GigaChatClient
+        client = GigaChatClient(
             token="t",
             model="GigaChat-3-Ultra",
             api_url="http://x",

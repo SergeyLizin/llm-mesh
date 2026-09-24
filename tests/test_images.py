@@ -25,7 +25,7 @@ from llm_mesh import (
     OpenAIClient,
 )
 from llm_mesh.gigachat.batch import GigaChatBatchClient
-from llm_mesh.gigachat.client import GIGACHAT_BASE_URL, GigaChatAsyncClient
+from llm_mesh.gigachat.client import GIGACHAT_BASE_URL, GigaChatClient
 from llm_mesh.hooks import configure_request_hook
 
 OPENAI_URL = "https://host/v1/chat/completions"
@@ -213,7 +213,7 @@ async def test_gemini_inline_data_and_url_rejection():
 @pytest.mark.asyncio
 async def test_gigachat_rejects_images_and_keeps_text_only_bodies():
     route = respx.post(GIGACHAT_URL).mock(return_value=httpx.Response(200, json=_openai_ok()))
-    client = GigaChatAsyncClient(token="dummy", model="GigaChat")
+    client = GigaChatClient(token="dummy", model="GigaChat")
     try:
         with pytest.raises(LLMValidationError, match="no image input"):
             await client.generate_text(LLMRequest(
@@ -265,7 +265,7 @@ async def test_gigachat_guard_sees_images_before_the_provider_limit():
         return request
 
     configure_request_hook(check_request=strip_images)
-    client = GigaChatAsyncClient(token="dummy", model="GigaChat")
+    client = GigaChatClient(token="dummy", model="GigaChat")
     try:
         await client.generate_text(LLMRequest(
             system="s", user="look", mode="text", images=[ImageAttachment(data=PNG)],
@@ -288,7 +288,7 @@ async def test_gigachat_guard_can_block_images():
 
     configure_request_hook(check_request=block_images)
     route = respx.post(GIGACHAT_URL).mock(return_value=httpx.Response(200, json=_openai_ok()))
-    client = GigaChatAsyncClient(token="dummy", model="GigaChat")
+    client = GigaChatClient(token="dummy", model="GigaChat")
     try:
         with pytest.raises(LLMRequestBlocked):
             await client.generate_text(LLMRequest(

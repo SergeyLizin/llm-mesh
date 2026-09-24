@@ -343,7 +343,7 @@ def apply_route_env(route: dict) -> dict[str, str]:
 
 def _build_gigachat_client(route: dict, env: dict) -> Any:
     """Build the GigaChat client. Batch mode swaps in the coalescing adapter."""
-    from llm_mesh.gigachat import GigaChatAsyncClient
+    from llm_mesh.gigachat import GigaChatClient
 
     model = env["LLM_MODEL"]
     # Supply resolved connection settings explicitly to the selected provider.
@@ -368,7 +368,7 @@ def _build_gigachat_client(route: dict, env: dict) -> Any:
             credentials=kwargs.get("credentials"),
             scope=kwargs.get("scope"),
         )
-    return GigaChatAsyncClient(**kwargs)
+    return GigaChatClient(**kwargs)
 
 
 def _build_gemini_client(route: dict, env: dict) -> Any:

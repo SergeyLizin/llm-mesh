@@ -20,7 +20,7 @@ from llm_mesh import (
     check_routes,
 )
 from llm_mesh.anthropic.client import AnthropicClient
-from llm_mesh.gigachat.client import GigaChatAsyncClient
+from llm_mesh.gigachat.client import GigaChatClient
 from llm_mesh.models_catalog import _MANAGED_ENV, _cli, _format_check_line, make_client
 from llm_mesh.openai.client import OpenAIClient, chat_completions_url
 
@@ -224,7 +224,7 @@ async def test_gigachat_counts_tokens_and_does_not_chat():
         200, json=[{"tokens": 2}],
     )
     chat = respx.post(f"{GIGA_API}/chat/completions").respond(500, text="no")
-    client = GigaChatAsyncClient(
+    client = GigaChatClient(
         credentials="credentials",
         scope="GIGACHAT_API_PERS",
         model="GigaChat-2",

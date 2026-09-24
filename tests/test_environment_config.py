@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from llm_mesh import OpenAIClient, GigaChatAsyncClient, LLMRequest
+from llm_mesh import OpenAIClient, GigaChatClient, LLMRequest
 from llm_mesh.config import get_env, read_options
 from llm_mesh.gigachat.batch import GigaChatBatchClient, get_batching_client
 from llm_mesh.models_catalog import _MANAGED_ENV, apply_route_env, make_client, route_env
@@ -72,7 +72,7 @@ def test_connection_settings_are_read_when_client_is_constructed(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "test-key")
     monkeypatch.setenv("LLM_VERIFY_SSL", "true")
     monkeypatch.setenv("LLM_OPTIONS", '{"http_timeout": 17}')
-    c = GigaChatAsyncClient()
+    c = GigaChatClient()
     assert c._api_url == "https://proxy.test/v1"
     assert c._auth_url == "https://proxy.test/oauth"
     assert c._scope == "scope-one"
@@ -87,7 +87,7 @@ def test_connection_settings_are_read_when_client_is_constructed(monkeypatch):
 def test_explicit_connection_arguments_take_precedence(monkeypatch):
     monkeypatch.setenv("LLM_BASE_URL", "https://environment.test/v1")
     monkeypatch.setenv("LLM_VERIFY_SSL", "false")
-    c = GigaChatAsyncClient(token="token", api_url="https://explicit.test/v1", verify=True)
+    c = GigaChatClient(token="token", api_url="https://explicit.test/v1", verify=True)
     assert c._api_url == "https://explicit.test/v1" and c._verify is True
 
 
@@ -126,7 +126,7 @@ def test_garbage_timeout_and_retries_keep_defaults(monkeypatch, caplog):
     monkeypatch.setenv("LLM_MAX_RETRIES", "lots")
     with caplog.at_level("WARNING"):
         client = OpenAIClient(base_url="https://example.test", api_key="test-key")
-        giga = GigaChatAsyncClient(token="tok")
+        giga = GigaChatClient(token="tok")
     assert client._http_timeout == 600.0
     assert client._max_retries == 3
     assert giga._timeout.read == 600.0

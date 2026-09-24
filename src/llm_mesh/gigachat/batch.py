@@ -19,7 +19,7 @@ import httpx
 
 from .client import (
     GIGACHAT_BASE_URL,
-    GigaChatAsyncClient,
+    GigaChatClient,
 )
 from ._common import simplify_schema_for_gigachat, split_reasoning_content
 from llm_mesh._common import _env_flag, finish_reason_opt
@@ -58,7 +58,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 class GigaChatBatchClient:
-    """Async GigaChat batch client. Reuse OAuth from GigaChatAsyncClient or supply a static token.
+    """Async GigaChat batch client. Reuse OAuth from GigaChatClient or supply a static token.
     An injected http_client, including an ASGI test transport, remains owned by the caller and
     is not closed by this client.
     """
@@ -66,7 +66,7 @@ class GigaChatBatchClient:
     def __init__(
         self,
         *,
-        auth: GigaChatAsyncClient | None = None,
+        auth: GigaChatClient | None = None,
         token: str | None = None,
         base_url: str | None = None,
         http_client: httpx.AsyncClient | None = None,
@@ -80,7 +80,7 @@ class GigaChatBatchClient:
     ) -> None:
         if auth is None and token is None:
             raise LLMAuthError(
-                "GigaChatBatchClient: requires either `auth` (GigaChatAsyncClient), or `token`"
+                "GigaChatBatchClient: requires either `auth` (GigaChatClient), or `token`"
             )
         self._auth = auth
         self._token = token
@@ -689,7 +689,7 @@ def get_batching_client(
     scope: str | None = None,
 ) -> BatchingLLMClient:
     """Return the process-wide BatchingLLMClient for this model. Sharing enables coalescing across
-    sessions; the nested GigaChatAsyncClient supplies OAuth.
+    sessions; the nested GigaChatClient supplies OAuth.
     """
     key = (model, credentials, scope,
            tuple((name, get_env(name)) for name in CONNECTION_ENV),
@@ -700,7 +700,7 @@ def get_batching_client(
     with _BATCH_SINGLETONS_LOCK:
         cli = _BATCH_SINGLETONS.get(key)
         if cli is None:
-            auth = GigaChatAsyncClient(model=model, credentials=credentials, scope=scope)
+            auth = GigaChatClient(model=model, credentials=credentials, scope=scope)
             cli = BatchingLLMClient(GigaChatBatchClient(auth=auth), model=model)
             _BATCH_SINGLETONS[key] = cli
         return cli

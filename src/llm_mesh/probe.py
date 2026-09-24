@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict
 
 from llm_mesh.anthropic.client import AnthropicClient
 from llm_mesh.gemini.client import GeminiClient
-from llm_mesh.gigachat.client import GigaChatAsyncClient
+from llm_mesh.gigachat.client import GigaChatClient
 from llm_mesh.models_catalog import make_client, route_model, routes_for
 from llm_mesh.openai.client import OpenAIClient
 from llm_mesh.types import LLMRequest, LLMTimeoutError
@@ -78,7 +78,7 @@ def _identity(client: Any) -> tuple[str, str, str]:
         return client.PROVIDER, "anthropic", client._model
     if isinstance(client, GeminiClient):
         return client.PROVIDER, "gemini", client._model
-    if isinstance(client, GigaChatAsyncClient):
+    if isinstance(client, GigaChatClient):
         return client.PROVIDER, "gigachat", client.model
     return type(client).__name__, "", ""
 
@@ -99,7 +99,7 @@ def _probe_for(client: Any) -> ProbeKind:
         return ProbeKind.EMBED
     if task == "rerank":
         return ProbeKind.RERANK
-    if isinstance(client, (GigaChatAsyncClient, AnthropicClient, GeminiClient)):
+    if isinstance(client, (GigaChatClient, AnthropicClient, GeminiClient)):
         return ProbeKind.COUNT_TOKENS
     if isinstance(client, OpenAIClient):
         return ProbeKind.GENERATE_TEXT

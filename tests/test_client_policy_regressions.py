@@ -6,7 +6,7 @@ import pytest
 
 from llm_mesh import LLMRequest
 from llm_mesh.openai import OpenAIClient
-from llm_mesh.gigachat import GigaChatAsyncClient
+from llm_mesh.gigachat import GigaChatClient
 
 SCHEMA = {"type": "object", "properties": {"answer": {"type": "string", "enum": ["ok"]}},
           "required": ["answer"]}
@@ -67,7 +67,7 @@ async def test_catalog_tool_choice_reaches_wire(monkeypatch, preference, multipl
 @pytest.mark.asyncio
 async def test_gigachat_stream_uses_configured_reasoning_field(monkeypatch):
     monkeypatch.setenv("LLM_OPTIONS", '{"reasoning_field":"custom_thought"}')
-    client = GigaChatAsyncClient(token="dummy", model="m")
+    client = GigaChatClient(token="dummy", model="m")
     payload = {"choices": [{"delta": {"custom_thought": "thought", "reasoning": "wrong"}, "finish_reason": "stop"}]}
     client._client = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(200, text="data: " + json.dumps(payload) + "\n\ndata: [DONE]\n\n")))

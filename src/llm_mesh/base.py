@@ -175,7 +175,7 @@ class Capability(str, Enum):
     # Gateway /score or /v1/rerank, or a local cross-encoder.
     RERANK = "rerank"
     # Batch submission. Interactive clients do not declare this: GigaChat
-    # batching is a separate transport, not a method of GigaChatAsyncClient.
+    # batching is a separate transport, not a method of GigaChatClient.
     BATCH = "batch"
 
 

@@ -49,7 +49,7 @@ async def main():
 asyncio.run(main())
 ```
 
-The same `LLMRequest` works with `AnthropicClient`, `GeminiClient`, and `GigaChatAsyncClient`. Close the client with `aclose()` when you are done.
+The same `LLMRequest` works with `AnthropicClient`, `GeminiClient`, and `GigaChatClient`. Close the client with `aclose()` when you are done. `GigaChatClient` was named `GigaChatAsyncClient` through 2.2.0; the old name remains as a deprecated alias and is removed in 3.0.0.
 
 To pick a model from the bundled catalog instead of constructing a client by hand:
 
@@ -94,7 +94,7 @@ OpenAI's file Batch API accepts embeddings as well as chat. `OpenAIBatchClient.b
 
 | | OpenAI-compatible | Anthropic | Gemini | GigaChat |
 | --- | --- | --- | --- | --- |
-| Class | `OpenAIClient` | `AnthropicClient` | `GeminiClient` | `GigaChatAsyncClient` |
+| Class | `OpenAIClient` | `AnthropicClient` | `GeminiClient` | `GigaChatClient` |
 | Default endpoint | `LLM_BASE_URL` (required) | `https://api.anthropic.com` | `https://generativelanguage.googleapis.com/v1beta` | `https://gigachat.devices.sberbank.ru/api/v1` |
 | API key | `LLM_API_KEY` | `LLM_API_KEY` | `LLM_API_KEY` | OAuth client credentials in `LLM_API_KEY`, or a `token` |
 | Structured output | tools, then declared `response_format` | native tool use and `output_config.format` | `responseSchema` and function calling | legacy functions and native JSON Schema |
@@ -104,11 +104,11 @@ OpenAI's file Batch API accepts embeddings as well as chat. `OpenAIBatchClient.b
 | Batch | chat and embeddings | no | no | chat |
 
 ```python
-from llm_mesh import AnthropicClient, GeminiClient, GigaChatAsyncClient
+from llm_mesh import AnthropicClient, GeminiClient, GigaChatClient
 
 anthropic = AnthropicClient(model="claude-sonnet-5")
 gemini = GeminiClient(model="gemini-2.5-flash")
-gigachat = GigaChatAsyncClient(model="GigaChat-2")
+gigachat = GigaChatClient(model="GigaChat-2")
 ```
 
 `GeminiClient` calls the native generateContent API. Catalog routes whose kind is `openai` stay on `OpenAIClient`, including OpenAI-compatible Gemini proxies. The bundled native Gemini route is `gemini-25-flash`. The bundled native Anthropic routes are `claude-opus-5`, `claude-sonnet-4-6`, and `claude-haiku-4-5`.

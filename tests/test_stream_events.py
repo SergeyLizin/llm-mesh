@@ -487,7 +487,7 @@ class TestGigaChatStreamEvents:
         """
 
         async def run() -> list[StreamEvent]:
-            from llm_mesh.gigachat.client import GigaChatAsyncClient as GigaChatClient
+            from llm_mesh.gigachat.client import GigaChatClient as GigaChatClient
 
             monkeypatch.setenv("LLM_BASE_URL", "http://g")
             monkeypatch.setenv("LLM_API_KEY", "k")

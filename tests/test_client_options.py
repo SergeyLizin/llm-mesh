@@ -5,7 +5,7 @@ import httpx
 import pytest
 import respx
 
-from llm_mesh import OpenAIClient, GigaChatAsyncClient, LLMRequest, LLMValidationError
+from llm_mesh import OpenAIClient, GigaChatClient, LLMRequest, LLMValidationError
 from llm_mesh.stream_events import Complete
 
 
@@ -63,15 +63,15 @@ async def test_stream_request_options_are_preserved(client, monkeypatch, method)
 
 def test_gigachat_token_limit_can_be_supplied_by_caller(monkeypatch):
     monkeypatch.delenv("LLM_MAX_OUTPUT_TOKENS", raising=False)
-    c = GigaChatAsyncClient(token="test-token", use_model_token_limits=False)
+    c = GigaChatClient(token="test-token", use_model_token_limits=False)
     assert c._clip_max_tokens(100000) == 100000
     monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "1000")
-    c = GigaChatAsyncClient(token="test-token", use_model_token_limits=False)
+    c = GigaChatClient(token="test-token", use_model_token_limits=False)
     assert c._clip_max_tokens(100000) == 1000
 
 
 def test_gigachat_json_schema_errors_retain_payload():
-    c = GigaChatAsyncClient(token="test-token")
+    c = GigaChatClient(token="test-token")
     payload = {"choices": [{"message": {"content": "invalid"}}]}
     request = LLMRequest(system="s", user="u", mode="json_schema")
     with pytest.raises(LLMValidationError) as exc:

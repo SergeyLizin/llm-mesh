@@ -11,7 +11,7 @@ import respx
 from llm_mesh import (
     AnthropicClient,
     Capability,
-    GigaChatAsyncClient,
+    GigaChatClient,
     GeminiClient,
     OpenAIClient,
     QueryInstruction,
@@ -152,7 +152,7 @@ async def test_openai_embed_empty_input_does_not_call() -> None:
 @pytest.mark.asyncio
 @respx.mock
 async def test_gigachat_embed_refreshes_on_401_and_refuses_sparse() -> None:
-    client = GigaChatAsyncClient(token="t", api_url="https://giga.test/api/v1", model="Embeddings")
+    client = GigaChatClient(token="t", api_url="https://giga.test/api/v1", model="Embeddings")
     calls = {"n": 0}
 
     async def _refresh() -> str:

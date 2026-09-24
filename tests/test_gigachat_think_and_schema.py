@@ -15,7 +15,7 @@ from llm_mesh.gigachat._common import (
     simplify_schema_for_gigachat,
     split_reasoning_content,
 )
-from llm_mesh.gigachat.client import GIGACHAT_AUTH_URL, GIGACHAT_BASE_URL, GigaChatAsyncClient
+from llm_mesh.gigachat.client import GIGACHAT_AUTH_URL, GIGACHAT_BASE_URL, GigaChatClient
 from llm_mesh.stream_events import Complete, ContentDelta, ReasoningDelta
 from llm_mesh.types import LLMRequest
 
@@ -133,7 +133,7 @@ def test_generate_text_strips_think_and_keeps_field():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         response = await client.generate_text(LLMRequest(system="s", user="u", mode="text"))
         await client.aclose()
         return response
@@ -160,7 +160,7 @@ def test_generate_text_uses_think_when_field_is_absent():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         response = await client.generate_text(
             LLMRequest(system="s", user="u", mode="json_schema", schema={"type": "object"})
         )
@@ -185,7 +185,7 @@ def test_stream_reassembles_a_split_think_tag():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         chunks = [
             chunk
             async for chunk in client.generate_stream(LLMRequest(system="s", user="u", mode="text"))
@@ -209,7 +209,7 @@ def test_stream_events_emit_reasoning_before_the_answer():
     )
 
     async def run():
-        client = GigaChatAsyncClient(credentials=CREDS)
+        client = GigaChatClient(credentials=CREDS)
         events = [
             event
             async for event in client.generate_stream_events(

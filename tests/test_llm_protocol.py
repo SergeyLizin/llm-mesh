@@ -19,7 +19,7 @@ from llm_mesh._common import (
 from llm_mesh.anthropic import AnthropicClient
 from llm_mesh.base import BaseLLMClient, Capability
 from llm_mesh.gemini import GeminiClient
-from llm_mesh.gigachat.client import GigaChatAsyncClient
+from llm_mesh.gigachat.client import GigaChatClient
 from llm_mesh.gigachat.batch import BatchingLLMClient
 from llm_mesh.models_catalog import (
     VALID_KINDS,
@@ -128,7 +128,7 @@ def test_structured_history_included_both_providers() -> None:
         request.schema_ or {},
         {"type": "function", "function": {"name": request.function_name}},
     )
-    gigachat = GigaChatAsyncClient(token="t")
+    gigachat = GigaChatClient(token="t")
     gigachat_body = gigachat._build_body(request)
 
     expected_roles = ["system", "user", "assistant", "user"]
@@ -202,7 +202,7 @@ _EXPECTED_CAPABILITIES = {
         Capability.EMBEDDINGS,
     }),
     # Legacy functions API: one selected function, no native tool loop.
-    GigaChatAsyncClient: _INTERACTIVE | frozenset({
+    GigaChatClient: _INTERACTIVE | frozenset({
         Capability.COUNT_TOKENS,
         Capability.EMBEDDINGS,
     }),
@@ -253,8 +253,8 @@ def _gemini() -> GeminiClient:
     return GeminiClient(model="m", api_key="k")
 
 
-def _gigachat() -> GigaChatAsyncClient:
-    return GigaChatAsyncClient(token="t")
+def _gigachat() -> GigaChatClient:
+    return GigaChatClient(token="t")
 
 
 def test_valid_kinds_match_the_registry() -> None:
@@ -278,7 +278,7 @@ def test_unknown_kind_keeps_the_catalog_error(monkeypatch) -> None:
         ("openai", OpenAIClient),
         ("anthropic", AnthropicClient),
         ("gemini", GeminiClient),
-        ("gigachat", GigaChatAsyncClient),
+        ("gigachat", GigaChatClient),
     ],
 )
 def test_registry_client_satisfies_llm_client(monkeypatch, kind: str, cls: type) -> None:
@@ -484,7 +484,7 @@ def test_supports_ignores_instance_switches(monkeypatch) -> None:
     openai = _openai()
     assert openai._tools_enabled is False
     assert openai.supports(Capability.TOOLS)
-    gigachat = GigaChatAsyncClient(token="t", tool_choice="single")
+    gigachat = GigaChatClient(token="t", tool_choice="single")
     assert gigachat.supports(Capability.MULTI_TOOL)
     assert openai.supports(Capability.COUNT_TOKENS)
     assert gigachat.supports(Capability.COUNT_TOKENS)

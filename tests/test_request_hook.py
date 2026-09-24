@@ -22,7 +22,7 @@ from llm_mesh import (
     LLMValidationError,
 )
 from llm_mesh.gigachat.batch import BatchingLLMClient, GigaChatBatchClient
-from llm_mesh.gigachat.client import GIGACHAT_BASE_URL, GigaChatAsyncClient
+from llm_mesh.gigachat.client import GIGACHAT_BASE_URL, GigaChatClient
 from llm_mesh.hooks import configure_request_hook, identity_check_request
 from llm_mesh.openai.batch import OpenAIBatchClient
 from llm_mesh.openai.client import OpenAIClient
@@ -49,7 +49,7 @@ def _clients():
         "gemini": GeminiClient(
             model="gemini-2.5-flash", api_key="k", base_url="https://gemini.test/v1beta",
         ),
-        "gigachat": GigaChatAsyncClient(token="pre-baked", model="GigaChat"),
+        "gigachat": GigaChatClient(token="pre-baked", model="GigaChat"),
     }
 
 

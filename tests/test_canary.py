@@ -4,7 +4,7 @@ import logging
 import pytest
 
 from llm_mesh import LLMRequest, _common, canary, hooks
-from llm_mesh.gigachat import GigaChatAsyncClient
+from llm_mesh.gigachat import GigaChatClient
 from llm_mesh.openai import OpenAIClient
 
 
@@ -28,7 +28,7 @@ def test_canary_context_reaches_shared_clients(provider, caplog):
         client = OpenAIClient(base_url="https://example.test/v1", api_key="test-key")
         messages = client._messages
     else:
-        client = GigaChatAsyncClient(token="test-token")
+        client = GigaChatClient(token="test-token")
         messages = lambda request: client._build_body(request)["messages"]
     request = LLMRequest(system="system", user="user")
     token = canary.set_canary_context_token("test-canary")

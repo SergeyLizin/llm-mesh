@@ -7,7 +7,7 @@ import httpx
 import pytest
 import respx
 
-from llm_mesh import GigaChatAsyncClient, LLMRequest, OpenAIClient
+from llm_mesh import GigaChatClient, LLMRequest, OpenAIClient
 
 BASE = 'https://example.invalid/v1'
 SCHEMA = {'type': 'object', 'properties': {'answer': {'type': 'string'}}}
@@ -19,7 +19,7 @@ USAGE = {'prompt_tokens': 10, 'completion_tokens': 4, 'total_tokens': 14,
 def client_for(provider):
     if provider == 'openai':
         return OpenAIClient(model='m', base_url=BASE, api_key='dummy')
-    return GigaChatAsyncClient(model='m', api_url=BASE, token='dummy')
+    return GigaChatClient(model='m', api_url=BASE, token='dummy')
 
 
 def payload():
