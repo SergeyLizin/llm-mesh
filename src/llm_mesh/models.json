@@ -2752,7 +2752,7 @@
   },
   {
     "id": "gigachat3-ultra-ron",
-    "title": "GigaChat-3-Ultra (on)",
+    "title": "GigaChat-3.5 Reasoning (on)",
     "kind": "gigachat",
     "legacy_functions": true,
     "max_tokens": 32768,
@@ -2760,7 +2760,7 @@
     "providers": [
       {
         "name": "gigachat",
-        "model": "GigaChat-3-Ultra",
+        "model": "GigaChat-3.5-Reasoning",
         "base_url_env": "GIGAPERS_BASE_URL",
         "api_key_env": "GIGAPERS_API_KEY",
         "scope_env": "GIGAPERS_SCOPE",
@@ -2768,14 +2768,14 @@
           "reasoning_effort": "high"
         },
         "eval_concurrency": 1,
-        "notes": "reasoning_effort consumes the entire budget without final content. Retained for comparison with reasoning-off."
+        "notes": "Замена GigaChat-3-Ultra по объявлению Сбера (недоступна с 05.10.2026, стоимость прежняя). reasoning_effort=high ранее сжигал весь бюджет на Ultra без content — на 3.5-Reasoning не подтверждено, нужен live-замер. Точное имя модели в GigaPers API не верифицировано (auth URL недоступен из текущей сети) — принято по аналогии: GigaChat-3-Pro, GigaChat-3-Ultra → GigaChat-3.5-Reasoning."
       }
     ],
     "structured_mode": "json_schema"
   },
   {
     "id": "gigachat3-ultra-roff",
-    "title": "GigaChat-3-Ultra (off)",
+    "title": "GigaChat-3.5 Reasoning (off)",
     "kind": "gigachat",
     "legacy_functions": true,
     "max_tokens": 32768,
@@ -2783,7 +2783,7 @@
     "providers": [
       {
         "name": "gigachat",
-        "model": "GigaChat-3-Ultra",
+        "model": "GigaChat-3.5-Reasoning",
         "base_url_env": "GIGAPERS_BASE_URL",
         "api_key_env": "GIGAPERS_API_KEY",
         "scope_env": "GIGAPERS_SCOPE",
@@ -2792,7 +2792,8 @@
             "enable_thinking": false
           }
         },
-        "eval_concurrency": 1
+        "eval_concurrency": 1,
+        "notes": "Замена GigaChat-3-Ultra по объявлению Сбера (недоступна с 05.10.2026, стоимость прежняя). Точное имя модели в GigaPers API не верифицировано."
       }
     ],
     "structured_mode": "json_schema"
