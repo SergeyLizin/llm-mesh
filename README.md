@@ -346,9 +346,9 @@ Batch clients and `count_tokens` stay on the constructor timeout. They honor a p
 | OpenAI | `data:` URL in an `image_url` part | `image_url` part |
 | Anthropic | base64 `source` (`anthropic-version` `2023-06-01` accepts it) | `source` type `url` on that same version |
 | Gemini | `inlineData` part (`mimeType`, camelCase like the rest of the body) | rejected: generateContent has no public-URL image input |
-| GigaChat | rejected: legacy functions chat has no image input | rejected |
+| GigaChat | uploaded to `/files` (`purpose=general`), referenced by id in the user turn's `attachments`, deleted after the call; text paths only (`generate_text`, streams) | rejected: pass bytes |
 
-`media_type` defaults to `image/png` for bytes and must be png, jpeg, gif, or webp. The canary scans text only. The request guard sees the attachments and may refuse them. Metrics records are unchanged.
+GigaChat structured output (legacy functions chat) and GigaChat batches have no image input and raise `LLMValidationError` before any HTTP. Uploads count against the endpoint's concurrency limit and use the same token refresh and retry rules as chat; deleting the uploaded file is best-effort and only logged on failure. `media_type` defaults to `image/png` for bytes and must be png, jpeg, gif, or webp. The canary scans text only. The request guard sees the attachments and may refuse them. Metrics records are unchanged.
 
 ## Adding a provider
 

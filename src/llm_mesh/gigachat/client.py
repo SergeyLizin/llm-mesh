@@ -71,6 +71,15 @@ from llm_mesh.types import (
 logger = logging.getLogger(__name__)
 
 
+# File name extensions GigaChat accepts for uploaded images, by media type.
+_IMAGE_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+
+
 def _check_response_canary(response_text: str, context: str = "") -> None:
     """Scan generated text and serialized function arguments for the active canary. With no token
     this is a no-op; detection logs CRITICAL through the application hook without raising.
@@ -155,8 +164,12 @@ class GigaChatClient(BaseLLMClient):
     ``LLM_EXTRA_HEADERS`` merge onto chat requests; fields the client
     already set win.
 
-    Legacy functions chat has no image input. A request with images
-    raises ``LLMValidationError`` before any HTTP.
+    Images (``LLMRequest.images``) are sent on the text paths
+    (``generate_text``, ``generate_stream``, ``generate_stream_events``): each
+    image is uploaded to ``/files`` and referenced by id in the user turn's
+    ``attachments``; the uploaded files are deleted after the call. Image URLs
+    are not accepted, only bytes. Structured output (legacy functions chat) and
+    batches have no image input and raise ``LLMValidationError`` before any HTTP.
     """
 
     # TOOLS_REQUIRED is absent. generate_structured raises LLMValidationError
@@ -320,19 +333,137 @@ class GigaChatClient(BaseLLMClient):
     async def __aexit__(self, *_: Any) -> None:
         await self.aclose()
 
-    def _guarded_request(self, request: LLMRequest) -> LLMRequest:
-        # The hook sees the attachments and may refuse or replace the
-        # request. The provider limit applies to whatever remains.
-        request = super()._guarded_request(request)
-        self._reject_images(request)
-        return request
-
     @staticmethod
     def _reject_images(request: LLMRequest) -> None:
         if request.images:
             raise LLMValidationError(
-                "GigaChat: legacy functions chat has no image input"
+                "GigaChat: legacy functions chat has no image input; "
+                "images are supported in text mode (generate_text, streams)"
             )
+
+    # --- Images: /files upload + attachments ---------------------------------
+
+    async def _attach_images(self, request: LLMRequest, body: dict[str, Any]) -> list[str]:
+        """Upload the request's images and reference them in the user turn.
+
+        Returns the uploaded file ids; the caller deletes them with
+        ``_delete_files`` when the call is over. Nothing is uploaded when a
+        request has no images or an image is given by URL.
+        """
+        if not request.images:
+            return []
+        if any(image.data is None for image in request.images):
+            raise LLMValidationError("GigaChat: image URLs are not supported; pass image bytes")
+        messages = body.get("messages") or []
+        if not messages or messages[-1].get("role") != "user":
+            raise LLMValidationError("GigaChat: images need a user turn to attach to")
+        file_ids: list[str] = []
+        try:
+            for index, image in enumerate(request.images):
+                file_ids.append(await self._upload_file(image.data or b"", image.media_type or "image/png", index))
+        except BaseException:
+            await self._delete_files(file_ids)
+            raise
+        user = messages[-1]
+        content = user.get("content")
+        if isinstance(content, list):
+            # build_text_messages renders images as OpenAI image_url parts; GigaChat takes
+            # plain text content plus file ids, so keep only the text parts.
+            user["content"] = "".join(
+                part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
+            )
+        user["attachments"] = list(file_ids)
+        return file_ids
+
+    async def _upload_file(self, data: bytes, media_type: str, index: int) -> str:
+        """POST /files (purpose=general) under the endpoint limit; returns the file id."""
+        sem = self._ensure_semaphore()
+        if sem is None:
+            return await self._do_upload_file(data, media_type, index)
+        async with sem:
+            return await self._do_upload_file(data, media_type, index)
+
+    async def _do_upload_file(self, data: bytes, media_type: str, index: int) -> str:
+        ext = _IMAGE_EXTENSIONS.get(media_type, ".png")
+        url = f"{self._api_url}/files"
+        token = await self._ensure_token()
+        client = self._ensure_http()
+        max_attempts = self._retry_limit(self._max_transient_retries) + 1
+        refreshed = False
+        attempt = 0
+        while True:
+            try:
+                headers = self._chat_headers(token, str(uuid.uuid4()))
+                # httpx sets the multipart Content-Type with its boundary
+                headers.pop("Content-Type", None)
+                resp = await client.post(
+                    url,
+                    files={"file": (f"image{index}{ext}", data, media_type)},
+                    data={"purpose": "general"},
+                    headers=headers,
+                    **self._timeout_kw(),
+                )
+            except (
+                httpx.TimeoutException,
+                httpx.ConnectError,
+                httpx.ReadError,
+                httpx.NetworkError,
+                httpx.RemoteProtocolError,
+            ) as exc:
+                attempt += 1
+                if attempt >= max_attempts:
+                    raise LLMTimeoutError(f"GigaChat file upload failed after {attempt} attempts: {exc}") from exc
+                await asyncio.sleep(backoff_with_jitter(self._transient_backoff_s, attempt - 1))
+                continue
+            if resp.status_code == 200:
+                payload = resp.json()
+                file_id = payload.get("id") if isinstance(payload, dict) else None
+                if not isinstance(file_id, str) or not file_id:
+                    raise LLMValidationError("GigaChat file upload: response has no file id")
+                return file_id
+            if resp.status_code == 401 and not refreshed and self._max_refresh > 0:
+                token = await self._refresh_token()
+                refreshed = True
+                continue
+            retryable = resp.status_code == 429 or resp.status_code in RETRYABLE_SERVER_STATUS
+            attempt += 1
+            if retryable and attempt < max_attempts:
+                delay = (
+                    retry_after_delay(resp, self._transient_backoff_s, attempt - 1)
+                    if resp.status_code == 429
+                    else backoff_with_jitter(self._transient_backoff_s, attempt - 1)
+                )
+                logger.warning(
+                    "GigaChat file upload: %d → retry in %.1fs (attempt %d/%d)",
+                    resp.status_code, delay, attempt, max_attempts,
+                )
+                await asyncio.sleep(delay)
+                continue
+            if resp.status_code == 401:
+                raise LLMAuthError(f"GigaChat file upload 401 after refresh: {resp.text[:200]}")
+            raise LLMError(f"GigaChat file upload {resp.status_code}: {resp.text[:200]}")
+
+    async def _delete_files(self, file_ids: list[str]) -> None:
+        """Best-effort POST /files/{id}/delete; failures are logged, never raised."""
+        if not file_ids:
+            return
+        try:
+            token = await self._ensure_token()
+            client = self._ensure_http()
+        except Exception as exc:  # noqa: BLE001 - cleanup must not mask the call's outcome
+            logger.warning("GigaChat: cannot delete uploaded files %s: %s", file_ids, exc)
+            return
+        for file_id in file_ids:
+            try:
+                resp = await client.post(
+                    f"{self._api_url}/files/{file_id}/delete",
+                    headers=self._chat_headers(token, str(uuid.uuid4())),
+                    **self._timeout_kw(),
+                )
+                if resp.status_code != 200:
+                    logger.warning("GigaChat: delete of uploaded file %s returned %d", file_id, resp.status_code)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("GigaChat: delete of uploaded file %s failed: %s", file_id, exc)
 
     def _check_response_canary(self, response_text: str, *, context: str) -> None:
         """Scan text and serialized function arguments for the active canary.
@@ -883,14 +1014,18 @@ class GigaChatClient(BaseLLMClient):
             body["reasoning_effort"] = effort
         self._apply_reasoning_disable(body)
         self._apply_extra_body(body)
-        # When length_retry=False, preserve the small best-effort budget instead of escalating a
-        # truncated or repetitive response.
-        if request.length_retry:
-            payload, request_id = await self._post_chat_with_length_retry(
-                body, model=self._effective_model(request),
-            )
-        else:
-            payload, request_id = await self._post_chat_with_retry(body)
+        file_ids = await self._attach_images(request, body)
+        try:
+            # When length_retry=False, preserve the small best-effort budget instead of
+            # escalating a truncated or repetitive response.
+            if request.length_retry:
+                payload, request_id = await self._post_chat_with_length_retry(
+                    body, model=self._effective_model(request),
+                )
+            else:
+                payload, request_id = await self._post_chat_with_retry(body)
+        finally:
+            await self._delete_files(file_ids)
         if request.mode == "json_schema" or (request.tools and self._tool_choice == "auto"):
             try:
                 return self._parse_extended_response(payload, request, request_id)
@@ -966,14 +1101,18 @@ class GigaChatClient(BaseLLMClient):
         self._apply_reasoning_disable(body)
         self._apply_extra_body(body)
 
-        sem = self._ensure_semaphore()
-        if sem is None:
-            async for chunk in self._do_stream(body):
-                yield chunk
-            return
-        async with sem:
-            async for chunk in self._do_stream(body):
-                yield chunk
+        file_ids = await self._attach_images(request, body)
+        try:
+            sem = self._ensure_semaphore()
+            if sem is None:
+                async for chunk in self._do_stream(body):
+                    yield chunk
+                return
+            async with sem:
+                async for chunk in self._do_stream(body):
+                    yield chunk
+        finally:
+            await self._delete_files(file_ids)
 
     async def _do_stream(self, body: dict[str, Any]) -> AsyncIterator[LLMStreamChunk]:
         token = await self._ensure_token()
@@ -1368,14 +1507,18 @@ class GigaChatClient(BaseLLMClient):
         self._apply_reasoning_disable(body)
         self._apply_extra_body(body)
 
-        sem = self._ensure_semaphore()
-        if sem is None:
-            async for ev in self._do_stream_events(body):
-                yield ev
-            return
-        async with sem:
-            async for ev in self._do_stream_events(body):
-                yield ev
+        file_ids = await self._attach_images(request, body)
+        try:
+            sem = self._ensure_semaphore()
+            if sem is None:
+                async for ev in self._do_stream_events(body):
+                    yield ev
+                return
+            async with sem:
+                async for ev in self._do_stream_events(body):
+                    yield ev
+        finally:
+            await self._delete_files(file_ids)
 
     async def _do_stream_events(
         self, body: dict[str, Any]

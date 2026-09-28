@@ -209,24 +209,172 @@ async def test_gemini_inline_data_and_url_rejection():
     assert plain == {"role": "user", "parts": [{"text": "hi"}]}
 
 
+GIGACHAT_FILES = f"{GIGACHAT_BASE_URL}/files"
+
+
+def _mock_gigachat_files(file_id: str = "file-1"):
+    upload = respx.post(GIGACHAT_FILES).mock(
+        return_value=httpx.Response(200, json={"id": file_id, "object": "file", "purpose": "general"}),
+    )
+    delete = respx.post(f"{GIGACHAT_FILES}/{file_id}/delete").mock(
+        return_value=httpx.Response(200, json={"id": file_id, "deleted": True}),
+    )
+    return upload, delete
+
+
 @respx.mock
 @pytest.mark.asyncio
-async def test_gigachat_rejects_images_and_keeps_text_only_bodies():
+async def test_gigachat_uploads_image_and_attaches_it_to_the_user_turn():
+    upload, delete = _mock_gigachat_files("file-1")
+    chat = respx.post(GIGACHAT_URL).mock(return_value=httpx.Response(200, json=_openai_ok()))
+    client = GigaChatClient(token="dummy", model="GigaChat-2-Max")
+    try:
+        response = await client.generate_text(LLMRequest(
+            system="s", user="look", mode="text",
+            images=[ImageAttachment(data=PNG, media_type="image/jpeg")],
+        ))
+    finally:
+        await client.aclose()
+    assert response.text == "hi"
+    assert upload.call_count == 1
+    sent = upload.calls[0].request
+    assert sent.headers["content-type"].startswith("multipart/form-data")
+    assert sent.headers["authorization"] == "Bearer dummy"
+    assert b'name="purpose"' in sent.content and b"general" in sent.content
+    assert b'filename="image0.jpg"' in sent.content and PNG in sent.content
+    user = json.loads(chat.calls[0].request.content)["messages"][-1]
+    assert user == {"role": "user", "content": "look", "attachments": ["file-1"]}
+    assert PNG_B64 not in chat.calls[0].request.content.decode()
+    assert delete.call_count == 1  # uploaded file is removed after the call
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_gigachat_text_only_bodies_unchanged():
+    upload, _ = _mock_gigachat_files()
     route = respx.post(GIGACHAT_URL).mock(return_value=httpx.Response(200, json=_openai_ok()))
     client = GigaChatClient(token="dummy", model="GigaChat")
     try:
-        with pytest.raises(LLMValidationError, match="no image input"):
-            await client.generate_text(LLMRequest(
-                system="s", user="look", images=[ImageAttachment(data=PNG)],
-            ))
         await client.generate_text(LLMRequest(system="s", user="hi", mode="text"))
         await client.generate_text(LLMRequest(system="s", user="hi", mode="text", images=[]))
     finally:
         await client.aclose()
-    assert route.call_count == 2
+    assert upload.call_count == 0
     assert route.calls[0].request.content == route.calls[1].request.content
     user = json.loads(route.calls[0].request.content)["messages"][-1]
     assert user == {"role": "user", "content": "hi"}
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_gigachat_stream_with_image_attaches_and_cleans_up():
+    upload, delete = _mock_gigachat_files("file-9")
+    sse = (
+        'data: {"choices":[{"delta":{"content":"Схема"},"index":0}]}\n\n'
+        'data: {"choices":[{"delta":{},"index":0,"finish_reason":"stop"}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+    chat = respx.post(GIGACHAT_URL).mock(
+        return_value=httpx.Response(200, text=sse, headers={"content-type": "text/event-stream"}),
+    )
+    client = GigaChatClient(token="dummy", model="GigaChat-2-Max")
+    try:
+        chunks = [c async for c in client.generate_stream(LLMRequest(
+            system="s", user="look", mode="text", images=[ImageAttachment(data=PNG)],
+        ))]
+    finally:
+        await client.aclose()
+    assert "".join(c.delta_text or "" for c in chunks) == "Схема"
+    user = json.loads(chat.calls[0].request.content)["messages"][-1]
+    assert user["attachments"] == ["file-9"]
+    assert upload.call_count == 1 and delete.call_count == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_gigachat_rejects_image_urls_and_structured_images_before_http():
+    upload, _ = _mock_gigachat_files()
+    chat = respx.post(GIGACHAT_URL).mock(return_value=httpx.Response(200, json=_openai_ok()))
+    client = GigaChatClient(token="dummy", model="GigaChat")
+    try:
+        with pytest.raises(LLMValidationError, match="image URLs are not supported"):
+            await client.generate_text(LLMRequest(
+                system="s", user="look", mode="text",
+                images=[ImageAttachment(url="https://img.example/a.png")],
+            ))
+        with pytest.raises(LLMValidationError, match="no image input"):
+            await client.generate_structured(LLMRequest(
+                system="s", user="look", schema={"type": "object", "properties": {}},
+                images=[ImageAttachment(data=PNG)],
+            ))
+    finally:
+        await client.aclose()
+    assert upload.call_count == 0 and chat.call_count == 0
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_gigachat_upload_refreshes_token_on_401():
+    auth = respx.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth").mock(
+        return_value=httpx.Response(200, json={"access_token": "fresh", "expires_at": 4102444800000}),
+    )
+    upload = respx.post(GIGACHAT_FILES).mock(side_effect=[
+        httpx.Response(401, text="expired"),
+        httpx.Response(200, json={"id": "file-2"}),
+    ])
+    respx.post(f"{GIGACHAT_FILES}/file-2/delete").mock(return_value=httpx.Response(200, json={}))
+    chat = respx.post(GIGACHAT_URL).mock(return_value=httpx.Response(200, json=_openai_ok()))
+    client = GigaChatClient(credentials="Y3JlZHM=", model="GigaChat-2-Max")
+    try:
+        await client.generate_text(LLMRequest(
+            system="s", user="look", mode="text", images=[ImageAttachment(data=PNG)],
+        ))
+    finally:
+        await client.aclose()
+    assert upload.call_count == 2
+    assert upload.calls[1].request.headers["authorization"] == "Bearer fresh"
+    assert json.loads(chat.calls[0].request.content)["messages"][-1]["attachments"] == ["file-2"]
+    assert auth.call_count >= 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_gigachat_failed_upload_sends_no_chat_and_removes_earlier_uploads():
+    upload = respx.post(GIGACHAT_FILES).mock(side_effect=[
+        httpx.Response(200, json={"id": "file-a"}),
+        httpx.Response(400, text="bad image"),
+    ])
+    delete = respx.post(f"{GIGACHAT_FILES}/file-a/delete").mock(return_value=httpx.Response(200, json={}))
+    chat = respx.post(GIGACHAT_URL).mock(return_value=httpx.Response(200, json=_openai_ok()))
+    client = GigaChatClient(token="dummy", model="GigaChat-2-Max")
+    try:
+        with pytest.raises(Exception, match="file upload 400"):
+            await client.generate_text(LLMRequest(
+                system="s", user="look", mode="text",
+                images=[ImageAttachment(data=PNG), ImageAttachment(data=PNG)],
+            ))
+    finally:
+        await client.aclose()
+    assert upload.call_count == 2 and chat.call_count == 0 and delete.call_count == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_gigachat_cleanup_failure_does_not_fail_the_call(caplog):
+    respx.post(GIGACHAT_FILES).mock(return_value=httpx.Response(200, json={"id": "file-3"}))
+    respx.post(f"{GIGACHAT_FILES}/file-3/delete").mock(return_value=httpx.Response(500, text="oops"))
+    respx.post(GIGACHAT_URL).mock(return_value=httpx.Response(200, json=_openai_ok()))
+    client = GigaChatClient(token="dummy", model="GigaChat-2-Max")
+    try:
+        with caplog.at_level("WARNING"):
+            response = await client.generate_text(LLMRequest(
+                system="s", user="look", mode="text", images=[ImageAttachment(data=PNG)],
+            ))
+    finally:
+        await client.aclose()
+    assert response.text == "hi"
+    assert "file-3" in caplog.text
+    assert "secret-image" not in caplog.text
 
 
 @respx.mock
