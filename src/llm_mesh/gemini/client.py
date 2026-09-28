@@ -446,6 +446,7 @@ class GeminiClient(BaseLLMClient):
         streaming_structured: bool | None = None,
         budget: Budget | None = None,
         max_concurrent: int | None = None,
+        max_concurrent_streams: int | None = None,
     ) -> None:
         if fallback_policy not in ("recover", "preserve"):
             raise ValueError("fallback_policy must be 'recover' or 'preserve'")
@@ -470,7 +471,12 @@ class GeminiClient(BaseLLMClient):
         self._retry_backoff_s = float(get_env("LLM_RETRY_BACKOFF_S", "1.0") or "1.0")
         # Outbound concurrency: explicit argument, LLM_MAX_CONCURRENT, then no limit.
         # Shared by every client of the same base URL and key (llm_mesh.concurrency).
-        self._bind_concurrency(max_concurrent, base_url=self._base, credential=self._key)
+        self._bind_concurrency(
+            max_concurrent,
+            base_url=self._base,
+            credential=self._key,
+            max_concurrent_streams=max_concurrent_streams,
+        )
         self._max_output_tokens = _env_positive_int("LLM_MAX_OUTPUT_TOKENS")
         self._min_output_tokens = _env_positive_int("LLM_MIN_OUTPUT_TOKENS")
         self._length_retries = _env_nonneg_int("LLM_LENGTH_RETRIES", 1)
@@ -1224,13 +1230,8 @@ class GeminiClient(BaseLLMClient):
             await response.aclose()
 
     async def _under_semaphore(self, source: AsyncIterator[Any]) -> AsyncIterator[Any]:
-        """Hold the instance concurrency slot for the whole stream, including early close."""
-        sem = self._ensure_semaphore()
-        if sem is None:
-            async for item in source:
-                yield item
-            return
-        async with sem:
+        """Hold a streams slot and a regular slot for the whole stream, including early close."""
+        async with self._stream_slot():
             async for item in source:
                 yield item
 

@@ -210,6 +210,7 @@ class GigaChatClient(BaseLLMClient):
         max_transient_retries: int = 2,
         transient_backoff_s: float = 1.0,
         max_concurrent: int | None = None,
+        max_concurrent_streams: int | None = None,
         tool_choice: Literal["single", "auto"] = "single",
         use_model_token_limits: bool = True,
         no_degrade: bool | None = None,
@@ -259,6 +260,7 @@ class GigaChatClient(BaseLLMClient):
             max_concurrent,
             base_url=self._api_url,
             credential=self._credentials or self._token,
+            max_concurrent_streams=max_concurrent_streams,
         )
 
         # Use a catalog-configurable reasoning field, defaulting to reasoning_content.
@@ -1103,12 +1105,7 @@ class GigaChatClient(BaseLLMClient):
 
         file_ids = await self._attach_images(request, body)
         try:
-            sem = self._ensure_semaphore()
-            if sem is None:
-                async for chunk in self._do_stream(body):
-                    yield chunk
-                return
-            async with sem:
+            async with self._stream_slot():
                 async for chunk in self._do_stream(body):
                     yield chunk
         finally:
@@ -1509,12 +1506,7 @@ class GigaChatClient(BaseLLMClient):
 
         file_ids = await self._attach_images(request, body)
         try:
-            sem = self._ensure_semaphore()
-            if sem is None:
-                async for ev in self._do_stream_events(body):
-                    yield ev
-                return
-            async with sem:
+            async with self._stream_slot():
                 async for ev in self._do_stream_events(body):
                     yield ev
         finally:

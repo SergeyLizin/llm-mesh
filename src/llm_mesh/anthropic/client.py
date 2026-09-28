@@ -436,6 +436,7 @@ class AnthropicClient(BaseLLMClient):
         length_retry_cap: int = 32768,
         budget: Budget | None = None,
         max_concurrent: int | None = None,
+        max_concurrent_streams: int | None = None,
     ) -> None:
         if fallback_policy not in ("recover", "preserve"):
             raise ValueError("fallback_policy must be 'recover' or 'preserve'")
@@ -463,7 +464,12 @@ class AnthropicClient(BaseLLMClient):
         self._retry_backoff_s = float(get_env("LLM_RETRY_BACKOFF_S", "1.0") or "1.0")
         # Outbound concurrency: explicit argument, LLM_MAX_CONCURRENT, then no limit.
         # Shared by every client of the same base URL and key (llm_mesh.concurrency).
-        self._bind_concurrency(max_concurrent, base_url=base, credential=self._key)
+        self._bind_concurrency(
+            max_concurrent,
+            base_url=base,
+            credential=self._key,
+            max_concurrent_streams=max_concurrent_streams,
+        )
         self._max_output_tokens = _env_positive_int("LLM_MAX_OUTPUT_TOKENS")
         self._min_output_tokens = _env_positive_int("LLM_MIN_OUTPUT_TOKENS")
         # Zero is a valid retry budget. An invalid value keeps the default of 2.
@@ -1255,18 +1261,11 @@ class AnthropicClient(BaseLLMClient):
         body["stream"] = True
         visible: list[str] = []
         try:
-            sem = self._ensure_semaphore()
-            if sem is None:
+            async with self._stream_slot():
                 async for chunk in self._do_stream(body):
                     if chunk.delta_text:
                         visible.append(chunk.delta_text)
                     yield chunk
-            else:
-                async with sem:
-                    async for chunk in self._do_stream(body):
-                        if chunk.delta_text:
-                            visible.append(chunk.delta_text)
-                        yield chunk
         finally:
             # Same generator the caller closes. A nested generator's finally
             # would run only when that generator is collected.
@@ -1354,18 +1353,11 @@ class AnthropicClient(BaseLLMClient):
         body["stream"] = True
         visible: list[str] = []
         try:
-            sem = self._ensure_semaphore()
-            if sem is None:
+            async with self._stream_slot():
                 async for event in self._do_stream_events(body):
                     if isinstance(event, ContentDelta) and event.delta_text:
                         visible.append(event.delta_text)
                     yield event
-            else:
-                async with sem:
-                    async for event in self._do_stream_events(body):
-                        if isinstance(event, ContentDelta) and event.delta_text:
-                            visible.append(event.delta_text)
-                        yield event
         finally:
             self._check_response_canary(
                 "".join(visible), context="generate_stream_events",

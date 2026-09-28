@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import time
 from abc import ABC, abstractmethod
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import ContextVar
 from enum import Enum
 from typing import Any, AsyncIterator
@@ -241,24 +241,57 @@ class BaseLLMClient(ABC):
         *,
         base_url: str | None,
         credential: str | None,
+        max_concurrent_streams: int | None = None,
     ) -> None:
-        """Set the client's limit and join the limiter of its endpoint.
+        """Set the client's limits and join the limiter of its endpoint.
 
-        Precedence: the ``max_concurrent`` argument, then ``LLM_MAX_CONCURRENT``
-        (which a catalog route sets through ``LLM_OPTIONS``), then no own limit.
-        Clients sharing ``(base_url, credential)`` share one limiter; see
-        ``llm_mesh.concurrency``.
+        Precedence for each limit: the argument, then ``LLM_MAX_CONCURRENT`` /
+        ``LLM_MAX_CONCURRENT_STREAMS`` (which a catalog route sets through
+        ``LLM_OPTIONS``), then none. Clients sharing ``(base_url, credential)``
+        share the limiters; see ``llm_mesh.concurrency``.
         """
         from llm_mesh._common import _env_positive_int
-        from llm_mesh.concurrency import limit_scope, register_limit, validate_max_concurrent
+        from llm_mesh.concurrency import STREAMS, limit_scope, register_limit, validate_max_concurrent
 
         limit = validate_max_concurrent(max_concurrent)
         if limit is None:
             limit = _env_positive_int("LLM_MAX_CONCURRENT")
+        streams = validate_max_concurrent(max_concurrent_streams, name="max_concurrent_streams")
+        if streams is None:
+            streams = _env_positive_int("LLM_MAX_CONCURRENT_STREAMS")
         self._max_concurrent = limit
+        self._max_concurrent_streams = streams
         self._semaphore = None
         self._limit_scope = limit_scope(base_url, credential)
-        register_limit(self._limit_scope, limit, label=str(getattr(self, "PROVIDER", "")))
+        label = str(getattr(self, "PROVIDER", ""))
+        register_limit(self._limit_scope, limit, label=label)
+        register_limit(self._limit_scope, streams, label=label, kind=STREAMS)
+
+    def _ensure_stream_semaphore(self) -> asyncio.Semaphore | None:
+        """The endpoint's streams limiter in the running loop, or None."""
+        scope = getattr(self, "_limit_scope", None)
+        if scope is None:
+            return None
+        from llm_mesh.concurrency import STREAMS, scope_semaphore
+
+        return scope_semaphore(scope, STREAMS)
+
+    @asynccontextmanager
+    async def _stream_slot(self) -> AsyncIterator[None]:
+        """Hold a streams slot and a regular slot for the whole stream.
+
+        Streams take the streams limiter first, then the regular one; blocking
+        calls take only the regular one. The fixed order cannot deadlock, and a
+        streams limit below ``max_concurrent`` keeps slots free for short calls.
+        """
+        stream_sem = self._ensure_stream_semaphore()
+        sem = self._ensure_semaphore()
+        async with AsyncExitStack() as stack:
+            if stream_sem is not None:
+                await stack.enter_async_context(stream_sem)
+            if sem is not None:
+                await stack.enter_async_context(sem)
+            yield
 
     def _ensure_semaphore(self) -> asyncio.Semaphore | None:
         """The limiter for this client's endpoint in the running loop, or None.

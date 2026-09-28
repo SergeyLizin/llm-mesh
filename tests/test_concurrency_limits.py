@@ -138,3 +138,102 @@ def test_limit_holds_across_clients_of_one_endpoint(monkeypatch):
 
     asyncio.run(run())
     assert peak == 2
+
+
+# --- Streams limit: reserve slots for blocking calls --------------------------
+
+
+@pytest.fixture
+def _no_env_stream_limit(monkeypatch):
+    monkeypatch.delenv("LLM_MAX_CONCURRENT_STREAMS", raising=False)
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda **kw: OpenAIClient(model="m", base_url=BASE, api_key="k", **kw),
+        lambda **kw: AnthropicClient(model="m", api_key="k", **kw),
+        lambda **kw: GeminiClient(model="m", api_key="k", **kw),
+        lambda **kw: GigaChatAsyncClient(token="t", **kw),
+    ],
+    ids=["openai", "anthropic", "gemini", "gigachat"],
+)
+def test_streams_limit_argument_and_env(monkeypatch, _no_env_stream_limit, factory):
+    assert factory(max_concurrent=8, max_concurrent_streams=5)._max_concurrent_streams == 5
+    monkeypatch.setenv("LLM_MAX_CONCURRENT_STREAMS", "4")
+    assert factory(max_concurrent=8)._max_concurrent_streams == 4
+    with pytest.raises(ValueError, match="max_concurrent_streams"):
+        factory(max_concurrent_streams=0)
+
+
+def test_streams_limit_from_catalog_route_options(monkeypatch, _no_env_stream_limit):
+    monkeypatch.setenv("LLM_OPTIONS", '{"max_concurrent": 8, "max_concurrent_streams": 5}')
+    client = _openai()
+    assert (client._max_concurrent, client._max_concurrent_streams) == (8, 5)
+
+
+def test_streams_limit_not_below_total_warns(caplog, _no_env_stream_limit):
+    with caplog.at_level(logging.WARNING, logger="llm_mesh.concurrency"):
+        _openai(max_concurrent=4, max_concurrent_streams=4)
+    assert "max_concurrent_streams=4 is not below max_concurrent=4" in caplog.text
+
+
+def test_streams_leave_slots_for_blocking_calls(monkeypatch, _no_env_stream_limit):
+    """max_concurrent=3, streams=2: at most two streams, and a blocking call runs while they hold."""
+    active = {"stream": 0, "call": 0}
+    peak = {"stream": 0, "total": 0}
+    streams_running = asyncio.Event()
+    release = asyncio.Event()
+
+    def enter(kind):
+        active[kind] += 1
+        peak["stream"] = max(peak["stream"], active["stream"])
+        peak["total"] = max(peak["total"], active["stream"] + active["call"])
+
+    async def fake_stream(self, body):
+        enter("stream")
+        if active["stream"] == 2:
+            streams_running.set()
+        await release.wait()
+        active["stream"] -= 1
+        if False:  # pragma: no cover - makes this an async generator
+            yield None
+
+    async def fake_post(self, url, body, *, what):
+        enter("call")
+        await asyncio.sleep(0)
+        active["call"] -= 1
+        return {"data": [{"index": 0, "embedding": [0.0]}]}
+
+    monkeypatch.setattr(OpenAIClient, "_do_stream", fake_stream)
+    monkeypatch.setattr(OpenAIClient, "_post_json", fake_post)
+    client = _openai(max_concurrent=3, max_concurrent_streams=2)
+
+    async def consume():
+        from llm_mesh.types import LLMRequest
+
+        async for _ in client.generate_stream(LLMRequest(system="s", user="u", mode="text")):
+            pass
+
+    async def run():
+        streams = [asyncio.create_task(consume()) for _ in range(4)]
+        await asyncio.wait_for(streams_running.wait(), 1)
+        # Two streams hold their slots; a blocking call still gets the reserved slot.
+        await asyncio.wait_for(client.embed(["x"]), 1)
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*streams), 1)
+
+    asyncio.run(run())
+    assert peak["stream"] == 2
+    assert peak["total"] <= 3
+
+
+def test_streams_and_calls_share_the_endpoint_across_clients(monkeypatch, _no_env_stream_limit):
+    chat = _openai(model="chat", max_concurrent=3, max_concurrent_streams=2)
+    other = _openai(model="vision", max_concurrent=3)
+
+    async def run():
+        assert other._ensure_stream_semaphore() is chat._ensure_stream_semaphore()
+        assert other._ensure_semaphore() is chat._ensure_semaphore()
+
+    asyncio.run(run())
