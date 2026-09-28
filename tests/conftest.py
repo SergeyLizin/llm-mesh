@@ -19,6 +19,16 @@ from llm_mesh.hooks import (
 
 
 @pytest.fixture(autouse=True)
+def isolated_concurrency_limits():
+    """Endpoint limits are process-wide; keep tests from sharing them."""
+    from llm_mesh.concurrency import reset_limits
+
+    reset_limits()
+    yield
+    reset_limits()
+
+
+@pytest.fixture(autouse=True)
 def isolated_llm_options(monkeypatch):
     """Factory calls assign LLM_OPTIONS directly; prevent cross-test route leakage."""
     monkeypatch.delenv("LLM_OPTIONS", raising=False)

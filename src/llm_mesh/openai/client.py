@@ -295,6 +295,8 @@ class OpenAIClient(BaseLLMClient):
         tiktoken_encoding: str | None = None,
         rerank_protocol: str | None = None,
         budget: Budget | None = None,
+        max_concurrent: int | None = None,
+        max_concurrent_streams: int | None = None,
     ) -> None:
         if fallback_policy not in ("recover", "preserve"):
             raise ValueError("fallback_policy must be 'recover' or 'preserve'")
@@ -325,10 +327,14 @@ class OpenAIClient(BaseLLMClient):
             )
         self._max_retries = _env_int_default("LLM_MAX_RETRIES", 3, logger=logger)
         self._retry_backoff_s = float(get_env("LLM_RETRY_BACKOFF_S", "1.0"))
-        # Limit outbound concurrency with LLM_MAX_CONCURRENT. Create the per-instance semaphore
-        # lazily inside the active event loop.
-        self._max_concurrent = _env_positive_int("LLM_MAX_CONCURRENT")
-        self._semaphore: asyncio.Semaphore | None = None
+        # Outbound concurrency: explicit argument, LLM_MAX_CONCURRENT, then no limit.
+        # Shared by every client of the same base URL and key (llm_mesh.concurrency).
+        self._bind_concurrency(
+            max_concurrent,
+            base_url=self._base,
+            credential=self._key,
+            max_concurrent_streams=max_concurrent_streams,
+        )
         # Optional LLM_MAX_OUTPUT_TOKENS ceiling. There is no universal OpenAI-compatible
         # model-limit map, so the default leaves clipping to the endpoint.
         self._max_output_tokens = _env_positive_int("LLM_MAX_OUTPUT_TOKENS")
@@ -1216,12 +1222,7 @@ class OpenAIClient(BaseLLMClient):
             body.setdefault(k, v)
         if self._force_temperature is not None and "temperature" in body:
             body["temperature"] = self._force_temperature
-        sem = self._ensure_semaphore()
-        if sem is None:
-            async for chunk in self._do_stream(body):
-                yield chunk
-            return
-        async with sem:
+        async with self._stream_slot():
             async for chunk in self._do_stream(body):
                 yield chunk
 
@@ -2390,12 +2391,7 @@ class OpenAIClient(BaseLLMClient):
             body.setdefault(k, v)
         if self._force_temperature is not None:
             body["temperature"] = self._force_temperature
-        sem = self._ensure_semaphore()
-        if sem is None:
-            async for ev in self._do_stream_events(body):
-                yield ev
-            return
-        async with sem:
+        async with self._stream_slot():
             async for ev in self._do_stream_events(body):
                 yield ev
 

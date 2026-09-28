@@ -82,7 +82,7 @@ client = make_client(route)
 
 Anthropic has no embeddings API. `embed` raises `NotImplementedError`, and `supports(Capability.EMBEDDINGS)` is false.
 
-Embedding calls share the client's `LLM_MAX_CONCURRENT` semaphore with chat calls on that same instance. There is no separate process-wide limiter.
+Embedding and rerank calls share the concurrency limit with chat calls; see [Concurrency limits](#concurrency-limits).
 
 OpenAI's file Batch API accepts embeddings as well as chat. `OpenAIBatchClient.build_embedding_lines` writes one `/v1/embeddings` line per input, and `run_embedding_batch` submits that file. `LLM_BATCH_MODE` still coalesces chat completions only. A catalog route with `"task": "embeddings"` or `"task": "rerank"` is not wrapped in the chat coalescer.
 
@@ -149,7 +149,7 @@ async for event in client.generate_stream_events(request):
     print(type(event).__name__, event)
 ```
 
-Events live in `llm_mesh.stream_events`. `Complete` carries usage and `finish_reason` when the provider sent them. A transport failure yields `Error` and then raises. Streams share the client's `LLM_MAX_CONCURRENT` slot with blocking calls.
+Events live in `llm_mesh.stream_events`. `Complete` carries usage and `finish_reason` when the provider sent them. A transport failure yields `Error` and then raises. A stream holds its concurrency slot until it ends; `max_concurrent_streams` keeps slots free for blocking calls (see [Concurrency limits](#concurrency-limits)).
 
 `generate_stream` yields text chunks. OpenAI non-streaming calls can also be sent as SSE internally with `LLM_STREAM_TRANSPORT=true`; the public stream methods do not need that flag.
 
@@ -222,13 +222,25 @@ Constructor arguments override the environment, except `length_retry_cap`, where
 | `LLM_AUTH_URL`, `LLM_AUTH_SCOPE` | GigaChat OAuth. Default auth URL is `https://ngw.devices.sberbank.ru:9443/api/v2/oauth`. No default scope |
 | `LLM_VERIFY_SSL` | `0`, `false`, or `no` disables TLS verification |
 
+### Concurrency limits
+
+Providers limit concurrent requests per account, so the limit is shared per endpoint and credential, not per client object. Every client with the same `(base URL, API key)` — GigaChat: `(API URL, credentials or token)` — waits on one semaphore, whatever its model, label or task: chat, streams, embeddings and rerank all count. The key is kept only as a SHA-256 digest.
+
+- Set the limit with `max_concurrent=` on any client constructor (`OpenAIClient`, `AnthropicClient`, `GeminiClient`, `GigaChatAsyncClient`), or with `LLM_MAX_CONCURRENT` / a catalog route's `max_concurrent`. The argument wins.
+- When clients of one endpoint ask for different limits, the smallest wins and a warning is logged.
+- A client without its own limit still waits on the endpoint's limit set by another client.
+- The semaphore lives in the running event loop; the limit holds per loop. `llm_mesh.concurrency.reset_limits()` forgets all endpoints (tests).
+
+A stream (`generate_stream`, `generate_stream_events`, Gemini streaming structured output) holds its slot until it ends, because the provider counts an open stream as an active request. Long answers can therefore take every slot and queue short calls behind them. `max_concurrent_streams=` (or `LLM_MAX_CONCURRENT_STREAMS`, or a catalog route's `max_concurrent_streams`) reserves the rest: a stream takes a streams slot and then a regular slot; blocking calls take only a regular slot. With `max_concurrent=8, max_concurrent_streams=5` at most five streams run at once, at least three slots stay free for retrieval, embeddings and rerank, and the endpoint still never sees more than eight requests. The streams limit is shared per endpoint like the main one (smallest wins); a value not below `max_concurrent` has no effect and logs a warning.
+
 ### Output, reasoning, and schema
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `LLM_MAX_OUTPUT_TOKENS` | none; GigaChat uses a per-family ceiling | cap on the output budget |
 | `LLM_MIN_OUTPUT_TOKENS` | unset | OpenAI floor, for reasoning models that spend the budget before visible text |
-| `LLM_MAX_CONCURRENT` | unlimited | concurrent requests per client |
+| `LLM_MAX_CONCURRENT` | unlimited | concurrent requests per endpoint and key when no `max_concurrent` argument is given; see [Concurrency limits](#concurrency-limits) |
+| `LLM_MAX_CONCURRENT_STREAMS` | unlimited | concurrent streams per endpoint and key, a subset of `LLM_MAX_CONCURRENT` that keeps slots for blocking calls |
 | `LLM_DISABLE_REASONING` | false | turn reasoning off with the provider's declared dialect |
 | `LLM_REASONING_EFFORT` | unset | `low`, `medium`, or `high` |
 | `LLM_REASONING_FIELD` | `reasoning_content` | response field that holds reasoning text |
@@ -337,9 +349,9 @@ Batch clients and `count_tokens` stay on the constructor timeout. They honor a p
 | OpenAI | `data:` URL in an `image_url` part | `image_url` part |
 | Anthropic | base64 `source` (`anthropic-version` `2023-06-01` accepts it) | `source` type `url` on that same version |
 | Gemini | `inlineData` part (`mimeType`, camelCase like the rest of the body) | rejected: generateContent has no public-URL image input |
-| GigaChat | rejected: legacy functions chat has no image input | rejected |
+| GigaChat | uploaded to `/files` (`purpose=general`), referenced by id in the user turn's `attachments`, deleted after the call; text paths only (`generate_text`, streams) | rejected: pass bytes |
 
-`media_type` defaults to `image/png` for bytes and must be png, jpeg, gif, or webp. The canary scans text only. The request guard sees the attachments and may refuse them. Metrics records are unchanged.
+GigaChat structured output (legacy functions chat) and GigaChat batches have no image input and raise `LLMValidationError` before any HTTP. Uploads count against the endpoint's concurrency limit and use the same token refresh and retry rules as chat; deleting the uploaded file is best-effort and only logged on failure. `media_type` defaults to `image/png` for bytes and must be png, jpeg, gif, or webp. The canary scans text only. The request guard sees the attachments and may refuse them. Metrics records are unchanged.
 
 ## Adding a provider
 

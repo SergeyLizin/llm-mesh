@@ -24,7 +24,7 @@ ROUTE_OPTIONS = frozenset({
     "force_temperature", "force_top_p", "response_format", "open_object_schemas",
     "cache_hit_field", "cache_miss_field", "cache_nested_field",
     "extra_body", "extra_headers", "tool_choice_pref", "max_output_tokens",
-    "min_output_tokens", "max_concurrent", "reasoning_effort",
+    "min_output_tokens", "max_concurrent", "max_concurrent_streams", "reasoning_effort",
 })
 
 
