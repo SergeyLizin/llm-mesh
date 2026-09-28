@@ -82,7 +82,7 @@ client = make_client(route)
 
 Anthropic has no embeddings API. `embed` raises `NotImplementedError`, and `supports(Capability.EMBEDDINGS)` is false.
 
-Embedding calls share the client's `LLM_MAX_CONCURRENT` semaphore with chat calls on that same instance. There is no separate process-wide limiter.
+Embedding and rerank calls share the concurrency limit with chat calls; see [Concurrency limits](#concurrency-limits).
 
 OpenAI's file Batch API accepts embeddings as well as chat. `OpenAIBatchClient.build_embedding_lines` writes one `/v1/embeddings` line per input, and `run_embedding_batch` submits that file. `LLM_BATCH_MODE` still coalesces chat completions only. A catalog route with `"task": "embeddings"` or `"task": "rerank"` is not wrapped in the chat coalescer.
 
@@ -149,7 +149,7 @@ async for event in client.generate_stream_events(request):
     print(type(event).__name__, event)
 ```
 
-Events live in `llm_mesh.stream_events`. `Complete` carries usage and `finish_reason` when the provider sent them. A transport failure yields `Error` and then raises. Streams share the client's `LLM_MAX_CONCURRENT` slot with blocking calls.
+Events live in `llm_mesh.stream_events`. `Complete` carries usage and `finish_reason` when the provider sent them. A transport failure yields `Error` and then raises. A stream holds its concurrency slot until it ends, like a blocking call.
 
 `generate_stream` yields text chunks. OpenAI non-streaming calls can also be sent as SSE internally with `LLM_STREAM_TRANSPORT=true`; the public stream methods do not need that flag.
 
@@ -222,13 +222,22 @@ Constructor arguments override the environment, except `length_retry_cap`, where
 | `LLM_AUTH_URL`, `LLM_AUTH_SCOPE` | GigaChat OAuth. Default auth URL is `https://ngw.devices.sberbank.ru:9443/api/v2/oauth`. No default scope |
 | `LLM_VERIFY_SSL` | `0`, `false`, or `no` disables TLS verification |
 
+### Concurrency limits
+
+Providers limit concurrent requests per account, so the limit is shared per endpoint and credential, not per client object. Every client with the same `(base URL, API key)` — GigaChat: `(API URL, credentials or token)` — waits on one semaphore, whatever its model, label or task: chat, streams, embeddings and rerank all count. The key is kept only as a SHA-256 digest.
+
+- Set the limit with `max_concurrent=` on any client constructor (`OpenAIClient`, `AnthropicClient`, `GeminiClient`, `GigaChatAsyncClient`), or with `LLM_MAX_CONCURRENT` / a catalog route's `max_concurrent`. The argument wins.
+- When clients of one endpoint ask for different limits, the smallest wins and a warning is logged.
+- A client without its own limit still waits on the endpoint's limit set by another client.
+- The semaphore lives in the running event loop; the limit holds per loop. `llm_mesh.concurrency.reset_limits()` forgets all endpoints (tests).
+
 ### Output, reasoning, and schema
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `LLM_MAX_OUTPUT_TOKENS` | none; GigaChat uses a per-family ceiling | cap on the output budget |
 | `LLM_MIN_OUTPUT_TOKENS` | unset | OpenAI floor, for reasoning models that spend the budget before visible text |
-| `LLM_MAX_CONCURRENT` | unlimited | concurrent requests per client |
+| `LLM_MAX_CONCURRENT` | unlimited | concurrent requests per endpoint and key when no `max_concurrent` argument is given; see [Concurrency limits](#concurrency-limits) |
 | `LLM_DISABLE_REASONING` | false | turn reasoning off with the provider's declared dialect |
 | `LLM_REASONING_EFFORT` | unset | `low`, `medium`, or `high` |
 | `LLM_REASONING_FIELD` | `reasoning_content` | response field that holds reasoning text |

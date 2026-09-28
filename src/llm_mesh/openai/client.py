@@ -295,6 +295,7 @@ class OpenAIClient(BaseLLMClient):
         tiktoken_encoding: str | None = None,
         rerank_protocol: str | None = None,
         budget: Budget | None = None,
+        max_concurrent: int | None = None,
     ) -> None:
         if fallback_policy not in ("recover", "preserve"):
             raise ValueError("fallback_policy must be 'recover' or 'preserve'")
@@ -325,10 +326,9 @@ class OpenAIClient(BaseLLMClient):
             )
         self._max_retries = _env_int_default("LLM_MAX_RETRIES", 3, logger=logger)
         self._retry_backoff_s = float(get_env("LLM_RETRY_BACKOFF_S", "1.0"))
-        # Limit outbound concurrency with LLM_MAX_CONCURRENT. Create the per-instance semaphore
-        # lazily inside the active event loop.
-        self._max_concurrent = _env_positive_int("LLM_MAX_CONCURRENT")
-        self._semaphore: asyncio.Semaphore | None = None
+        # Outbound concurrency: explicit argument, LLM_MAX_CONCURRENT, then no limit.
+        # Shared by every client of the same base URL and key (llm_mesh.concurrency).
+        self._bind_concurrency(max_concurrent, base_url=self._base, credential=self._key)
         # Optional LLM_MAX_OUTPUT_TOKENS ceiling. There is no universal OpenAI-compatible
         # model-limit map, so the default leaves clipping to the endpoint.
         self._max_output_tokens = _env_positive_int("LLM_MAX_OUTPUT_TOKENS")

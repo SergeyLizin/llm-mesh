@@ -435,6 +435,7 @@ class AnthropicClient(BaseLLMClient):
         fallback_policy: Literal["recover", "preserve"] = "recover",
         length_retry_cap: int = 32768,
         budget: Budget | None = None,
+        max_concurrent: int | None = None,
     ) -> None:
         if fallback_policy not in ("recover", "preserve"):
             raise ValueError("fallback_policy must be 'recover' or 'preserve'")
@@ -460,8 +461,9 @@ class AnthropicClient(BaseLLMClient):
         ) or {}
         self._max_retries = _env_int_default("LLM_MAX_RETRIES", 3, logger=logger)
         self._retry_backoff_s = float(get_env("LLM_RETRY_BACKOFF_S", "1.0") or "1.0")
-        self._max_concurrent = _env_positive_int("LLM_MAX_CONCURRENT")
-        self._semaphore: asyncio.Semaphore | None = None
+        # Outbound concurrency: explicit argument, LLM_MAX_CONCURRENT, then no limit.
+        # Shared by every client of the same base URL and key (llm_mesh.concurrency).
+        self._bind_concurrency(max_concurrent, base_url=base, credential=self._key)
         self._max_output_tokens = _env_positive_int("LLM_MAX_OUTPUT_TOKENS")
         self._min_output_tokens = _env_positive_int("LLM_MIN_OUTPUT_TOKENS")
         # Zero is a valid retry budget. An invalid value keeps the default of 2.

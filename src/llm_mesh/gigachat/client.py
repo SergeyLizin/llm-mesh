@@ -240,13 +240,13 @@ class GigaChatClient(BaseLLMClient):
         self._refresh_lock = asyncio.Lock()
         self._client: httpx.AsyncClient | None = None
 
-        # Limit outbound chat requests per instance. Configuration precedence is explicit
-        # argument, LLM_MAX_CONCURRENT, then no limit. Lazily create the semaphore inside
-        # the active event loop.
-        if max_concurrent is None:
-            max_concurrent = _env_positive_int("LLM_MAX_CONCURRENT")
-        self._max_concurrent = max_concurrent
-        self._semaphore: asyncio.Semaphore | None = None
+        # Outbound concurrency: explicit argument, LLM_MAX_CONCURRENT, then no limit.
+        # Shared by every client of the same API URL and credential (llm_mesh.concurrency).
+        self._bind_concurrency(
+            max_concurrent,
+            base_url=self._api_url,
+            credential=self._credentials or self._token,
+        )
 
         # Use a catalog-configurable reasoning field, defaulting to reasoning_content.
         # Deployments with a different response field can declare it without changing parsing
