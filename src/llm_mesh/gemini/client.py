@@ -443,6 +443,7 @@ class GeminiClient(BaseLLMClient):
         no_degrade: bool | None = None,
         fallback_policy: Literal["recover", "preserve"] = "recover",
         validate_schema: bool = True,
+        streaming_structured: bool | None = None,
         budget: Budget | None = None,
     ) -> None:
         if fallback_policy not in ("recover", "preserve"):
@@ -476,6 +477,15 @@ class GeminiClient(BaseLLMClient):
             no_degrade if no_degrade is not None else _env_flag("LLM_NO_DEGRADE")
         )
         self._validate_schema = validate_schema
+        # Transport-only switch: send generateContent as streamGenerateContent and
+        # merge SSE chunks back into one payload before parsing. Same request, same
+        # model answer; exists because edge proxies (Cloudflare) kill non-streaming
+        # responses that exceed their first-byte window (HTTP 524) even though the
+        # origin is still generating.
+        self._streaming_structured = (
+            streaming_structured if streaming_structured is not None
+            else _env_flag("LLM_STREAM_STRUCTURED")
+        )
         self._disable_reasoning = _env_flag("LLM_DISABLE_REASONING")
         self._reasoning_effort = get_env("LLM_REASONING_EFFORT", "").strip().lower()
         forced = get_env("LLM_FORCE_TEMPERATURE", "").strip()
@@ -815,6 +825,42 @@ class GeminiClient(BaseLLMClient):
             return data, request_id
         raise GeminiError(f"{self.PROVIDER} retry exhausted: {last_exc}")
 
+    def _merge_stream_chunks(self, chunks: list[dict[str, Any]]) -> dict[str, Any]:
+        """Fold streamGenerateContent SSE chunks into one generateContent payload.
+
+        Parts concatenate in arrival order (text deltas become many small parts —
+        downstream text/functionCall extraction iterates parts, so this is
+        transparent). finishReason and cumulative usageMetadata/modelVersion:
+        last non-empty wins (Google streams cumulative usage).
+        """
+        parts: list[dict[str, Any]] = []
+        finish: str | None = None
+        usage: dict[str, Any] | None = None
+        model_version: str | None = None
+        for chunk in chunks:
+            if isinstance(chunk.get("error"), dict):
+                message = chunk["error"].get("message") or chunk["error"]
+                raise GeminiError(f"{self.PROVIDER}: {message}", detail=str(message))
+            for candidate in chunk.get("candidates") or []:
+                content = candidate.get("content") or {}
+                parts.extend(content.get("parts") or [])
+                if candidate.get("finishReason"):
+                    finish = candidate["finishReason"]
+            if chunk.get("usageMetadata"):
+                usage = chunk["usageMetadata"]
+            if chunk.get("modelVersion"):
+                model_version = chunk["modelVersion"]
+        merged: dict[str, Any] = {
+            "candidates": [{
+                "content": {"role": "model", "parts": parts},
+                "finishReason": finish,
+            }],
+            "usageMetadata": usage or {},
+        }
+        if model_version:
+            merged["modelVersion"] = model_version
+        return merged
+
     async def _post_limited(
         self,
         body: dict[str, Any],
@@ -823,6 +869,13 @@ class GeminiClient(BaseLLMClient):
         count: bool = False,
         embed: bool = False,
     ) -> tuple[dict[str, Any], str | None]:
+        if self._streaming_structured and not count and not embed:
+            chunks = [
+                payload async for payload in self._under_semaphore(
+                    self._iter_payloads(body, model=model)
+                )
+            ]
+            return self._merge_stream_chunks(chunks), None
         sem = self._ensure_semaphore()
         if sem is None:
             return await self._post(body, model=model, count=count, embed=embed)
