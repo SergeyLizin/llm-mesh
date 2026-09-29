@@ -7,6 +7,7 @@ refusal does not log the bytes.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 
@@ -250,6 +251,48 @@ async def test_gigachat_uploads_image_and_attaches_it_to_the_user_turn():
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_gigachat_image_delete_holds_the_endpoint_slot():
+    state = {"inflight": 0, "peak": 0}
+
+    def tracked(response: httpx.Response):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            del request
+            state["inflight"] += 1
+            state["peak"] = max(state["peak"], state["inflight"])
+            try:
+                await asyncio.sleep(0.02)
+                return response
+            finally:
+                state["inflight"] -= 1
+
+        return handler
+
+    respx.post(GIGACHAT_FILES).mock(side_effect=tracked(
+        httpx.Response(200, json={"id": "file-1", "object": "file"}),
+    ))
+    respx.post(f"{GIGACHAT_FILES}/file-1/delete").mock(side_effect=tracked(
+        httpx.Response(200, json={"id": "file-1", "deleted": True}),
+    ))
+    respx.post(GIGACHAT_URL).mock(side_effect=tracked(
+        httpx.Response(200, json=_openai_ok()),
+    ))
+    client = GigaChatClient(token="dummy", model="GigaChat-2", max_concurrent=1)
+
+    async def one() -> None:
+        await client.generate_text(LLMRequest(
+            system="s", user="look", mode="text",
+            images=[ImageAttachment(data=PNG, media_type="image/png")],
+        ))
+
+    try:
+        await asyncio.gather(one(), one(), one())
+    finally:
+        await client.aclose()
+    assert state["peak"] == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_gigachat_text_only_bodies_unchanged():
     upload, _ = _mock_gigachat_files()
     route = respx.post(GIGACHAT_URL).mock(return_value=httpx.Response(200, json=_openai_ok()))
@@ -455,7 +498,7 @@ async def test_gigachat_batch_rejects_images_before_upload():
     )
     client = GigaChatBatchClient(token="dummy")
     try:
-        with pytest.raises(LLMValidationError, match="no image input"):
+        with pytest.raises(LLMValidationError, match="batches have no image input"):
             await client.run_chat_batch([LLMRequest(
                 system="s", user="look", images=[ImageAttachment(data=PNG)],
             )])

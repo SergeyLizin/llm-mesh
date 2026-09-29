@@ -80,7 +80,7 @@ def test_smallest_limit_wins_with_warning(caplog):
         return _openai(max_concurrent=8)._ensure_semaphore()
 
     sem = asyncio.run(run())
-    assert sem._value == 3
+    assert sem is not None and sem.limit == 3
 
 
 def test_client_without_own_limit_joins_endpoint_limit():
@@ -113,7 +113,7 @@ def test_semaphore_is_per_event_loop():
     first = asyncio.run(get())
     second = asyncio.run(get())
     assert first is not second
-    assert first._value == second._value == 2
+    assert first.limit == second.limit == 2
 
 
 def test_limit_holds_across_clients_of_one_endpoint(monkeypatch):
@@ -170,6 +170,79 @@ def test_streams_limit_from_catalog_route_options(monkeypatch, _no_env_stream_li
     monkeypatch.setenv("LLM_OPTIONS", '{"max_concurrent": 8, "max_concurrent_streams": 5}')
     client = _openai()
     assert (client._max_concurrent, client._max_concurrent_streams) == (8, 5)
+
+
+def test_anthropic_equivalent_bases_share_one_limiter():
+    bare = AnthropicClient(
+        model="m", api_key="k", base_url="https://host", max_concurrent=1,
+    )
+    versioned = AnthropicClient(
+        model="m", api_key="k", base_url="https://host/v1", max_concurrent=1,
+    )
+    assert bare.URL == versioned.URL == "https://host/v1/messages"
+    assert bare._limit_scope == versioned._limit_scope
+
+
+def test_closed_loops_leave_the_registry():
+    """A waited limiter must not keep its event loop alive after the loop closes."""
+    import gc
+    import weakref
+
+    refs: list[weakref.ReferenceType[asyncio.AbstractEventLoop]] = []
+
+    async def once() -> None:
+        client = _openai(max_concurrent=1)
+        limiter = client._ensure_semaphore()
+        assert limiter is not None
+
+        async def hold() -> None:
+            async with limiter:
+                await asyncio.sleep(0.01)
+
+        await asyncio.gather(hold(), hold())
+
+    for _ in range(3):
+        loop = asyncio.new_event_loop()
+        refs.append(weakref.ref(loop))
+        try:
+            loop.run_until_complete(once())
+        finally:
+            loop.close()
+            del loop
+    gc.collect()
+    assert [ref() is not None for ref in refs] == [False, False, False]
+
+
+def test_lowered_limit_applies_to_the_existing_limiter():
+    """A limiter created at 4 admits at most 2 once a later client lowers the scope."""
+    first = _openai(max_concurrent=4)
+
+    async def run():
+        limiter = first._ensure_semaphore()
+        assert limiter is not None and limiter.limit == 4
+        _openai(max_concurrent=2)
+        assert limiter.limit == 2
+        active = 0
+        peak = 0
+
+        async def hold():
+            nonlocal active, peak
+            async with limiter:
+                active += 1
+                peak = max(peak, active)
+                await asyncio.sleep(0.01)
+                active -= 1
+
+        await asyncio.gather(*(hold() for _ in range(4)))
+        return peak
+
+    assert asyncio.run(run()) == 2
+
+
+def test_streams_without_request_limit_warns(caplog, _no_env_stream_limit):
+    with caplog.at_level(logging.WARNING, logger="llm_mesh.concurrency"):
+        _openai(max_concurrent_streams=2)
+    assert "without max_concurrent" in caplog.text
 
 
 def test_streams_limit_not_below_total_warns(caplog, _no_env_stream_limit):

@@ -10,7 +10,7 @@ import httpx
 import pytest
 import respx
 
-from llm_mesh import GeminiClient, GeminiError, LLMRequest, LLMValidationError
+from llm_mesh import GeminiClient, GeminiError, LLMRequest, LLMTimeoutError, LLMValidationError
 from llm_mesh.gemini.client import generate_content_url
 from llm_mesh.models_catalog import make_client, missing_credentials
 from llm_mesh.probe import check_client
@@ -473,6 +473,144 @@ async def test_parallel_streams_honor_the_concurrency_limit(monkeypatch, method)
     assert len(done) == 2
     assert all(done)
     await client.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+def _sse(chunks: list[dict]) -> str:
+    return "".join("data: " + json.dumps(chunk) + "\n\n" for chunk in chunks)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_streaming_structured_joins_text_and_keeps_the_header_request_id():
+    chunks = [
+        {
+            "candidates": [{"content": {"role": "model", "parts": [{"text": "Hel"}]}}],
+            "responseId": "from-body",
+        },
+        {
+            "candidates": [{"content": {"parts": [{"text": "lo"}]}, "finishReason": "STOP"}],
+            "usageMetadata": {
+                "promptTokenCount": 3,
+                "candidatesTokenCount": 1,
+                "totalTokenCount": 4,
+            },
+            "modelVersion": MODEL,
+        },
+    ]
+    route = respx.post(STREAM_URL).mock(return_value=httpx.Response(
+        200, text=_sse(chunks), headers={"x-goog-request-id": "hdr-7"},
+    ))
+    plain = respx.post(URL).mock(return_value=httpx.Response(500, text="not this path"))
+    async with aclosing(_client(streaming_structured=True)) as client:
+        response = await client.generate_text(_request())
+    assert route.call_count == 1 and plain.call_count == 0
+    assert response.text == "Hello"
+    assert response.request_id == "hdr-7"
+    assert response.model == MODEL
+    assert response.usage.prompt_tokens == 3
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_streaming_structured_reports_a_blocked_prompt():
+    respx.post(STREAM_URL).mock(return_value=httpx.Response(
+        200, text=_sse([{"promptFeedback": {"blockReason": "SAFETY"}}]),
+    ))
+    async with aclosing(_client(streaming_structured=True)) as client:
+        with pytest.raises(LLMValidationError, match="prompt blocked"):
+            await client.generate_text(_request())
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_streaming_structured_keeps_a_body_request_id_without_a_header():
+    chunks = [{
+        "candidates": [{
+            "content": {"parts": [{"text": "ok"}]},
+            "finishReason": "STOP",
+        }],
+        "responseId": "resp-calls",
+    }]
+    respx.post(STREAM_URL).mock(return_value=httpx.Response(200, text=_sse(chunks)))
+    async with aclosing(_client(streaming_structured=True)) as client:
+        response = await client.generate_text(_request())
+    assert response.text == "ok"
+    assert response.request_id == "resp-calls"
+
+
+class _TimeoutAfter(httpx.AsyncByteStream):
+    """Yield one SSE prefix, then fail the rest of the body."""
+
+    def __init__(self, prefix: bytes) -> None:
+        self._prefix = prefix
+
+    async def __aiter__(self):
+        if self._prefix:
+            yield self._prefix
+        raise httpx.ReadTimeout("read timed out")
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_streaming_structured_retries_a_read_timeout_before_returning():
+    prefix = _sse([{
+        "candidates": [{"content": {"parts": [{"text": "The answer is incom"}]}}],
+    }]).encode()
+    done = _sse([{
+        "candidates": [{
+            "content": {"parts": [{"text": "The answer is complete"}]},
+            "finishReason": "STOP",
+        }],
+        "responseId": "resp-retry",
+    }])
+    calls = {"n": 0}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        del request
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, stream=_TimeoutAfter(prefix))
+        return httpx.Response(200, text=done, headers={"x-goog-request-id": "hdr-retry"})
+
+    respx.post(STREAM_URL).mock(side_effect=respond)
+    async with aclosing(_client(streaming_structured=True)) as client:
+        client._retry_backoff_s = 0
+        response = await client.generate_text(_request())
+    assert calls["n"] == 2
+    assert response.text == "The answer is complete"
+    assert response.request_id == "hdr-retry"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_streaming_structured_read_timeout_is_not_a_raw_httpx_error():
+    prefix = _sse([{
+        "candidates": [{"content": {"parts": [{"text": "The answer is incom"}]}}],
+    }]).encode()
+    respx.post(STREAM_URL).mock(return_value=httpx.Response(200, stream=_TimeoutAfter(prefix)))
+    async with aclosing(_client(streaming_structured=True)) as client:
+        client._max_retries = 0
+        client._retry_backoff_s = 0
+        with pytest.raises(LLMTimeoutError, match="network error"):
+            await client.generate_text(_request())
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_streaming_structured_rejects_a_stream_without_finish_reason():
+    respx.post(STREAM_URL).mock(return_value=httpx.Response(
+        200, text=_sse([{
+            "candidates": [{"content": {"parts": [{"text": "The answer is incom"}]}}],
+        }]),
+    ))
+    async with aclosing(_client(streaming_structured=True)) as client:
+        with pytest.raises(GeminiError, match="finishReason"):
+            await client.generate_text(_request())
 
 
 @pytest.mark.asyncio

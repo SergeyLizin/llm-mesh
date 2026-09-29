@@ -151,7 +151,7 @@ async for event in client.generate_stream_events(request):
 
 Events live in `llm_mesh.stream_events`. `Complete` carries usage and `finish_reason` when the provider sent them. A transport failure yields `Error` and then raises. A stream holds its concurrency slot until it ends; `max_concurrent_streams` keeps slots free for blocking calls (see [Concurrency limits](#concurrency-limits)).
 
-`generate_stream` yields text chunks. OpenAI non-streaming calls can also be sent as SSE internally with `LLM_STREAM_TRANSPORT=true`; the public stream methods do not need that flag.
+`generate_stream` yields text chunks. OpenAI non-streaming calls can also be sent as SSE internally with `LLM_STREAM_TRANSPORT=true`; the public stream methods do not need that flag. Gemini structured and text `generateContent` stay one response unless `LLM_STREAM_STRUCTURED` is set (default false) or `GeminiClient(streaming_structured=True)`; count and embed stay non-streaming either way. The SSE chunks are merged back into one payload. A blocked prompt stays a prompt block, a body that ends without `finishReason` is an error, and a read failure is retried before the call returns.
 
 ## Model catalog
 
@@ -231,7 +231,7 @@ Providers limit concurrent requests per account, so the limit is shared per endp
 - A client without its own limit still waits on the endpoint's limit set by another client.
 - The semaphore lives in the running event loop; the limit holds per loop. `llm_mesh.concurrency.reset_limits()` forgets all endpoints (tests).
 
-A stream (`generate_stream`, `generate_stream_events`, Gemini streaming structured output) holds its slot until it ends, because the provider counts an open stream as an active request. Long answers can therefore take every slot and queue short calls behind them. `max_concurrent_streams=` (or `LLM_MAX_CONCURRENT_STREAMS`, or a catalog route's `max_concurrent_streams`) reserves the rest: a stream takes a streams slot and then a regular slot; blocking calls take only a regular slot. With `max_concurrent=8, max_concurrent_streams=5` at most five streams run at once, at least three slots stay free for retrieval, embeddings and rerank, and the endpoint still never sees more than eight requests. The streams limit is shared per endpoint like the main one (smallest wins); a value not below `max_concurrent` has no effect and logs a warning.
+A stream (`generate_stream`, `generate_stream_events`, and Gemini `generateContent` when `LLM_STREAM_STRUCTURED` is on) holds its slot until it ends, because the provider counts an open stream as an active request. Long answers can therefore take every slot and queue short calls behind them. `max_concurrent_streams=` (or `LLM_MAX_CONCURRENT_STREAMS`, or a catalog route's `max_concurrent_streams`) reserves the rest: a stream takes a streams slot and then a regular slot; blocking calls take only a regular slot. With `max_concurrent=8, max_concurrent_streams=5` at most five streams run at once, at least three slots stay free for retrieval, embeddings and rerank, and the endpoint still never sees more than eight requests. The streams limit is shared per endpoint like the main one (smallest wins). A streams limit that is not below `max_concurrent` does not reserve a slot for blocking calls and logs a warning. A streams limit set without `max_concurrent` caps streams only; blocking calls stay unlimited, and that also logs a warning. A limit lowered after the limiter exists applies to the next acquire. Calls that already hold a slot finish.
 
 ### Output, reasoning, and schema
 
@@ -240,7 +240,8 @@ A stream (`generate_stream`, `generate_stream_events`, Gemini streaming structur
 | `LLM_MAX_OUTPUT_TOKENS` | none; GigaChat uses a per-family ceiling | cap on the output budget |
 | `LLM_MIN_OUTPUT_TOKENS` | unset | OpenAI floor, for reasoning models that spend the budget before visible text |
 | `LLM_MAX_CONCURRENT` | unlimited | concurrent requests per endpoint and key when no `max_concurrent` argument is given; see [Concurrency limits](#concurrency-limits) |
-| `LLM_MAX_CONCURRENT_STREAMS` | unlimited | concurrent streams per endpoint and key, a subset of `LLM_MAX_CONCURRENT` that keeps slots for blocking calls |
+| `LLM_MAX_CONCURRENT_STREAMS` | unlimited | concurrent streams per endpoint and key; keeps slots for blocking calls only when it is below `LLM_MAX_CONCURRENT` |
+| `LLM_STREAM_STRUCTURED` | false | Gemini: send `generateContent` as `streamGenerateContent` and merge the SSE chunks back into one payload (count and embed stay non-streaming). `streaming_structured=` on `GeminiClient` overrides it |
 | `LLM_DISABLE_REASONING` | false | turn reasoning off with the provider's declared dialect |
 | `LLM_REASONING_EFFORT` | unset | `low`, `medium`, or `high` |
 | `LLM_REASONING_FIELD` | `reasoning_content` | response field that holds reasoning text |

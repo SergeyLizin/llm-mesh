@@ -19,6 +19,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from llm_mesh._common import check_response_canary
+from llm_mesh.concurrency import EndpointLimiter
 from llm_mesh.stream_events import StreamEvent
 from llm_mesh.types import (
     Budget,
@@ -267,7 +268,7 @@ class BaseLLMClient(ABC):
         register_limit(self._limit_scope, limit, label=label)
         register_limit(self._limit_scope, streams, label=label, kind=STREAMS)
 
-    def _ensure_stream_semaphore(self) -> asyncio.Semaphore | None:
+    def _ensure_stream_semaphore(self) -> EndpointLimiter | None:
         """The endpoint's streams limiter in the running loop, or None."""
         scope = getattr(self, "_limit_scope", None)
         if scope is None:
@@ -293,7 +294,7 @@ class BaseLLMClient(ABC):
                 await stack.enter_async_context(sem)
             yield
 
-    def _ensure_semaphore(self) -> asyncio.Semaphore | None:
+    def _ensure_semaphore(self) -> EndpointLimiter | asyncio.Semaphore | None:
         """The limiter for this client's endpoint in the running loop, or None.
 
         Clients bound with ``_bind_concurrency`` share the semaphore of their

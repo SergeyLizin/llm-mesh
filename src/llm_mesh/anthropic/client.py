@@ -463,10 +463,11 @@ class AnthropicClient(BaseLLMClient):
         self._max_retries = _env_int_default("LLM_MAX_RETRIES", 3, logger=logger)
         self._retry_backoff_s = float(get_env("LLM_RETRY_BACKOFF_S", "1.0") or "1.0")
         # Outbound concurrency: explicit argument, LLM_MAX_CONCURRENT, then no limit.
-        # Shared by every client of the same base URL and key (llm_mesh.concurrency).
+        # The scope is the messages URL, not the raw base: "https://host" and
+        # "https://host/v1" both call /v1/messages and must share one limiter.
         self._bind_concurrency(
             max_concurrent,
-            base_url=base,
+            base_url=self.URL,
             credential=self._key,
             max_concurrent_streams=max_concurrent_streams,
         )

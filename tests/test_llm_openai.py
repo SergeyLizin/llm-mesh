@@ -2391,6 +2391,7 @@ def test_gigachat_ultra_gets_flagship_output_cap():
     from llm_mesh.gigachat.client import _model_max_tokens
 
     assert _model_max_tokens("GigaChat-3-Ultra") == 32768
+    assert _model_max_tokens("GigaChat-3.5-Reasoning") == 32768
     # Cover future model generations through the tier heuristic, not only exact names.
     assert _model_max_tokens("GigaChat-4-Ultra") == 32768
     assert _model_max_tokens("GigaChat-Ultra-preview") == 32768

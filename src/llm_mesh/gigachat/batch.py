@@ -38,6 +38,11 @@ from llm_mesh.types import (
 
 logger = logging.getLogger(__name__)
 
+_BATCH_IMAGES = (
+    "GigaChat: batches have no image input; "
+    "images are supported in text mode (generate_text, streams)"
+)
+
 
 class GigaChatBatchError(LLMError):
     """Batch API submission, polling, or result-download failure."""
@@ -297,9 +302,7 @@ class GigaChatBatchClient:
         # This line is text only. Building it from a request that carries
         # images would drop them and return a successful text result.
         if request.images:
-            raise LLMValidationError(
-                "GigaChat: legacy functions chat has no image input"
-            )
+            raise LLMValidationError(_BATCH_IMAGES)
         messages = [
             {"role": "system", "content": request.system},
             {"role": "user", "content": request.user},
@@ -404,9 +407,7 @@ class GigaChatBatchClient:
         kept: list[tuple[int, LLMRequest]] = []
         for index, req in accepted:
             if req.images:
-                exc = LLMValidationError(
-                    "GigaChat: legacy functions chat has no image input"
-                )
+                exc = LLMValidationError(_BATCH_IMAGES)
                 if not return_exceptions:
                     raise exc
                 errors[index] = exc

@@ -101,6 +101,10 @@ _MODEL_MAX_OUTPUT_TOKENS: dict[str, int] = {
     # a confirmed public specification; a lower cap silently truncates output, while an
     # excessive request produces a visible gateway error.
     "GigaChat-3-Ultra": 32768,
+    # Same flagship ceiling. This string is not a catalog wire id (the public
+    # model list still documents GigaChat-3-Ultra); a direct client must not
+    # fall through to the 4096 default the way Ultra did before its exact entry.
+    "GigaChat-3.5-Reasoning": 32768,
 }
 _DEFAULT_MAX_OUTPUT_TOKENS = 4096
 
@@ -349,8 +353,9 @@ class GigaChatClient(BaseLLMClient):
         """Upload the request's images and reference them in the user turn.
 
         Returns the uploaded file ids; the caller deletes them with
-        ``_delete_files`` when the call is over. Nothing is uploaded when a
-        request has no images or an image is given by URL.
+        ``_delete_files`` when the call is over. A request with no images
+        uploads nothing. An image given by URL raises ``LLMValidationError``
+        before any upload.
         """
         if not request.images:
             return []
@@ -446,7 +451,12 @@ class GigaChatClient(BaseLLMClient):
             raise LLMError(f"GigaChat file upload {resp.status_code}: {resp.text[:200]}")
 
     async def _delete_files(self, file_ids: list[str]) -> None:
-        """Best-effort POST /files/{id}/delete; failures are logged, never raised."""
+        """Best-effort POST /files/{id}/delete; failures are logged, never raised.
+
+        Each delete takes the same endpoint slot as upload and chat. Releasing
+        the slot before delete let the next call overlap the cleanup and exceed
+        ``max_concurrent``.
+        """
         if not file_ids:
             return
         try:
@@ -455,17 +465,25 @@ class GigaChatClient(BaseLLMClient):
         except Exception as exc:  # noqa: BLE001 - cleanup must not mask the call's outcome
             logger.warning("GigaChat: cannot delete uploaded files %s: %s", file_ids, exc)
             return
+        sem = self._ensure_semaphore()
         for file_id in file_ids:
             try:
-                resp = await client.post(
-                    f"{self._api_url}/files/{file_id}/delete",
-                    headers=self._chat_headers(token, str(uuid.uuid4())),
-                    **self._timeout_kw(),
-                )
-                if resp.status_code != 200:
-                    logger.warning("GigaChat: delete of uploaded file %s returned %d", file_id, resp.status_code)
+                if sem is None:
+                    await self._delete_uploaded_file(client, token, file_id)
+                else:
+                    async with sem:
+                        await self._delete_uploaded_file(client, token, file_id)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("GigaChat: delete of uploaded file %s failed: %s", file_id, exc)
+
+    async def _delete_uploaded_file(self, client: httpx.AsyncClient, token: str, file_id: str) -> None:
+        resp = await client.post(
+            f"{self._api_url}/files/{file_id}/delete",
+            headers=self._chat_headers(token, str(uuid.uuid4())),
+            **self._timeout_kw(),
+        )
+        if resp.status_code != 200:
+            logger.warning("GigaChat: delete of uploaded file %s returned %d", file_id, resp.status_code)
 
     def _check_response_canary(self, response_text: str, *, context: str) -> None:
         """Scan text and serialized function arguments for the active canary.

@@ -185,6 +185,78 @@ def _parts_of(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [part for part in parts if isinstance(part, dict)]
 
 
+def merge_stream_chunks(chunks: list[dict[str, Any]], *, provider: str = "gemini") -> dict[str, Any]:
+    by_index: dict[int, dict[str, Any]] = {}
+    feedback: dict[str, Any] | None = None
+    usage: dict[str, Any] | None = None
+    model_version: str | None = None
+    response_id: str | None = None
+    saw_candidate = False
+    for chunk in chunks:
+        if isinstance(chunk.get("error"), dict):
+            message = chunk["error"].get("message") or chunk["error"]
+            raise GeminiError(f"{provider}: {message}", detail=str(message))
+        raw_feedback = chunk.get("promptFeedback")
+        if isinstance(raw_feedback, dict):
+            if feedback is None:
+                feedback = dict(raw_feedback)
+            else:
+                for key, value in raw_feedback.items():
+                    feedback.setdefault(key, value)
+        if response_id is None and chunk.get("responseId"):
+            response_id = str(chunk["responseId"])
+        if chunk.get("usageMetadata"):
+            usage = chunk["usageMetadata"]
+        if chunk.get("modelVersion"):
+            model_version = chunk["modelVersion"]
+        for candidate in chunk.get("candidates") or []:
+            if not isinstance(candidate, dict):
+                continue
+            saw_candidate = True
+            index = candidate.get("index", 0)
+            try:
+                index = int(index)
+            except (TypeError, ValueError):
+                index = 0
+            slot = by_index.setdefault(index, {"parts": [], "finish": None, "extra": {}, "role": "model"})
+            content = candidate.get("content") or {}
+            if content.get("role"):
+                slot["role"] = content["role"]
+            for part in content.get("parts") or []:
+                if isinstance(part, dict):
+                    slot["parts"].append(part)
+            if candidate.get("finishReason"):
+                slot["finish"] = candidate["finishReason"]
+            for key in ("safetyRatings", "citationMetadata", "groundingMetadata", "finishMessage"):
+                if candidate.get(key):
+                    slot["extra"][key] = candidate[key]
+    merged: dict[str, Any] = {}
+    if response_id is not None:
+        merged["responseId"] = response_id
+    if model_version:
+        merged["modelVersion"] = model_version
+    if feedback is not None:
+        merged["promptFeedback"] = feedback
+    if usage is not None:
+        merged["usageMetadata"] = usage
+    if saw_candidate:
+        candidates = []
+        for index in sorted(by_index):
+            slot = by_index[index]
+            candidate = {
+                "content": {"role": slot["role"], "parts": slot["parts"]},
+                "index": index,
+                **slot["extra"],
+            }
+            if slot["finish"]:
+                candidate["finishReason"] = slot["finish"]
+            candidates.append(candidate)
+        merged["candidates"] = candidates
+    elif "promptFeedback" not in merged:
+        merged["candidates"] = [{"content": {"role": "model", "parts": []}}]
+    return merged
+
+
 def text_of(payload: dict[str, Any]) -> str:
     """Join user-visible text parts. Thought parts are not included."""
     return "".join(
@@ -748,6 +820,27 @@ class GeminiClient(BaseLLMClient):
             raw=payload,
         )
 
+    def _require_finished_stream(self, payload: dict[str, Any]) -> None:
+        """A buffered streamGenerateContent body is one complete response.
+
+        Gemini leaves ``finishReason`` unset until generation stops. Parts
+        without it are a prefix, not a successful answer. A block that never
+        started a candidate has no ``finishReason`` and is judged later by
+        ``_require_candidate``.
+        """
+        candidates = payload.get("candidates")
+        if not isinstance(candidates, list):
+            return
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            content = candidate.get("content")
+            parts = content.get("parts") if isinstance(content, dict) else None
+            if parts and not candidate.get("finishReason"):
+                raise GeminiError(
+                    f"{self.PROVIDER}: stream ended before finishReason"
+                )
+
     def _require_candidate(self, payload: dict[str, Any]) -> None:
         blocked = _block_reason(payload)
         if blocked:
@@ -836,38 +929,13 @@ class GeminiClient(BaseLLMClient):
     def _merge_stream_chunks(self, chunks: list[dict[str, Any]]) -> dict[str, Any]:
         """Fold streamGenerateContent SSE chunks into one generateContent payload.
 
-        Parts concatenate in arrival order (text deltas become many small parts —
-        downstream text/functionCall extraction iterates parts, so this is
-        transparent). finishReason and cumulative usageMetadata/modelVersion:
-        last non-empty wins (Google streams cumulative usage).
+        Text parts stay separate and are joined later by ``text_of``.
+        ``promptFeedback``, ``responseId``, per-candidate ``finishReason`` and
+        cumulative ``usageMetadata`` are kept (last non-empty wins, except the
+        first ``responseId`` and the first block reason). A chunk that only
+        carries ``promptFeedback`` does not grow an empty candidate.
         """
-        parts: list[dict[str, Any]] = []
-        finish: str | None = None
-        usage: dict[str, Any] | None = None
-        model_version: str | None = None
-        for chunk in chunks:
-            if isinstance(chunk.get("error"), dict):
-                message = chunk["error"].get("message") or chunk["error"]
-                raise GeminiError(f"{self.PROVIDER}: {message}", detail=str(message))
-            for candidate in chunk.get("candidates") or []:
-                content = candidate.get("content") or {}
-                parts.extend(content.get("parts") or [])
-                if candidate.get("finishReason"):
-                    finish = candidate["finishReason"]
-            if chunk.get("usageMetadata"):
-                usage = chunk["usageMetadata"]
-            if chunk.get("modelVersion"):
-                model_version = chunk["modelVersion"]
-        merged: dict[str, Any] = {
-            "candidates": [{
-                "content": {"role": "model", "parts": parts},
-                "finishReason": finish,
-            }],
-            "usageMetadata": usage or {},
-        }
-        if model_version:
-            merged["modelVersion"] = model_version
-        return merged
+        return merge_stream_chunks(chunks, provider=self.PROVIDER)
 
     async def _post_limited(
         self,
@@ -878,12 +946,18 @@ class GeminiClient(BaseLLMClient):
         embed: bool = False,
     ) -> tuple[dict[str, Any], str | None]:
         if self._streaming_structured and not count and not embed:
+            request_ids: list[str] = []
             chunks = [
                 payload async for payload in self._under_semaphore(
-                    self._iter_payloads(body, model=model)
+                    self._iter_payloads(body, model=model, request_ids=request_ids)
                 )
             ]
-            return self._merge_stream_chunks(chunks), None
+            merged = self._merge_stream_chunks(chunks)
+            self._require_finished_stream(merged)
+            request_id = request_ids[0] if request_ids else None
+            if request_id is None and merged.get("responseId"):
+                request_id = str(merged["responseId"])
+            return merged, request_id
         sem = self._ensure_semaphore()
         if sem is None:
             return await self._post(body, model=model, count=count, embed=embed)
@@ -1161,35 +1235,50 @@ class GeminiClient(BaseLLMClient):
         return response
 
     async def _iter_payloads(
-        self, body: dict[str, Any], *, model: str,
+        self,
+        body: dict[str, Any],
+        *,
+        model: str,
+        request_ids: list[str] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         url = generate_content_url(self._base, model, stream=True)
         headers = self._headers()
         client = self._ensure_http()
         last_exc: Exception | None = None
         response: httpx.Response | None = None
-        for attempt in range(self._retry_limit(self._max_retries) + 1):
+        # Structured calls buffer the whole SSE body, so a read failure can
+        # still use the retry budget. Live streams yield as bytes arrive and
+        # cannot restart a prefix the caller already saw.
+        buffer = request_ids is not None
+        network_errors = (
+            httpx.TimeoutException, httpx.ConnectError, httpx.ReadError,
+            httpx.NetworkError, httpx.RemoteProtocolError,
+        )
+        attempts = self._retry_limit(self._max_retries) + 1
+
+        def fail_network(exc: Exception, attempt: int) -> None:
+            err_cls = (
+                LLMTimeoutError
+                if isinstance(exc, httpx.TimeoutException)
+                else GeminiError
+            )
+            raise err_cls(
+                f"{self.PROVIDER} network error after {attempt + 1} attempts: {exc}"
+            ) from exc
+
+        for attempt in range(attempts):
             try:
                 request = client.build_request(
                     "POST", url, headers=headers, json=body, **self._timeout_kw(),
                 )
                 response = await client.send(request, stream=True)
-            except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError,
-                    httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+            except network_errors as exc:
                 last_exc = exc
-                if attempt == self._retry_limit(self._max_retries):
-                    err_cls = (
-                        LLMTimeoutError
-                        if isinstance(exc, httpx.TimeoutException)
-                        else GeminiError
-                    )
-                    raise err_cls(
-                        f"{self.PROVIDER} network error after "
-                        f"{attempt + 1} attempts: {exc}"
-                    ) from exc
+                if attempt == attempts - 1:
+                    fail_network(exc, attempt)
                 await asyncio.sleep(backoff_with_jitter(self._retry_backoff_s, attempt))
                 continue
-            if response.status_code in _RETRYABLE_STATUS and attempt < self._retry_limit(self._max_retries):
+            if response.status_code in _RETRYABLE_STATUS and attempt < attempts - 1:
                 status = response.status_code
                 delay = (
                     retry_after_delay(response, self._retry_backoff_s, attempt)
@@ -1200,8 +1289,7 @@ class GeminiClient(BaseLLMClient):
                 response = None
                 logger.warning(
                     "%s stream %s on attempt %d/%d — retry in %.1fs",
-                    self.PROVIDER, status, attempt + 1,
-                    self._retry_limit(self._max_retries) + 1, delay,
+                    self.PROVIDER, status, attempt + 1, attempts, delay,
                 )
                 await asyncio.sleep(delay)
                 continue
@@ -1216,7 +1304,42 @@ class GeminiClient(BaseLLMClient):
                     status_code=status,
                     detail=detail,
                 )
-            break
+            if not buffer:
+                break
+            try:
+                collected: list[dict[str, Any]] = []
+                async for payload in iter_sse_payloads(response.aiter_lines()):
+                    if isinstance(payload.get("error"), dict):
+                        message = payload["error"].get("message") or payload["error"]
+                        raise GeminiError(f"{self.PROVIDER}: {message}", detail=str(message))
+                    collected.append(payload)
+            except network_errors as exc:
+                await response.aclose()
+                response = None
+                last_exc = exc
+                if attempt == attempts - 1:
+                    fail_network(exc, attempt)
+                delay = backoff_with_jitter(self._retry_backoff_s, attempt)
+                logger.warning(
+                    "%s stream read failed on attempt %d/%d — retry in %.1fs: %s",
+                    self.PROVIDER, attempt + 1, attempts, delay, exc,
+                )
+                await asyncio.sleep(delay)
+                continue
+            except Exception:
+                await response.aclose()
+                raise
+            header_id = (
+                response.headers.get("x-request-id")
+                or response.headers.get("x-goog-request-id")
+            )
+            await response.aclose()
+            response = None
+            if header_id and not request_ids:
+                request_ids.append(header_id)
+            for payload in collected:
+                yield payload
+            return
         else:
             raise GeminiError(f"{self.PROVIDER} retry exhausted: {last_exc}")
         assert response is not None

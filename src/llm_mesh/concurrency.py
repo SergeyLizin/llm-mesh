@@ -13,12 +13,12 @@ Limits:
   exceeding the lower limit would fail with HTTP 429 anyway.
 - A client without its own limit still waits on the scope's limiter when
   another client registered one; the limit belongs to the endpoint.
-- The semaphore is created lazily in the running event loop. ``asyncio``
-  primitives are bound to one loop, so each loop gets its own semaphore for a
-  scope: the limit holds per event loop. Applications normally drive all
-  clients from a single loop.
-- A lowered limit applies to semaphores created afterwards. A semaphore that
-  already exists keeps its size; a warning names the scope.
+- The limiter is created lazily in the running event loop. Each loop gets
+  its own limiter for a scope: the limit holds per event loop. Applications
+  normally drive all clients from a single loop.
+- A lowered limit applies to the next acquire, including a limiter that
+  already exists. Calls that already hold a slot finish; they are not
+  cancelled.
 
 Streams: a scope may also have a smaller ``streams`` limit
 (``max_concurrent_streams``). A stream takes a streams slot, then a regular
@@ -46,6 +46,7 @@ __all__ = [
     "scope_limit",
     "scope_semaphore",
     "validate_max_concurrent",
+    "EndpointLimiter",
     "REQUESTS",
     "STREAMS",
 ]
@@ -56,13 +57,13 @@ STREAMS = "streams"
 _lock = threading.Lock()
 # (kind, scope) -> limit
 _limits: dict[tuple[str, str], int] = {}
-# loop -> {(kind, scope): (semaphore, size)}; loops are held weakly so closed loops drop out.
-_semaphores: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[str, str], tuple[asyncio.Semaphore, int]]]" = (
+# loop -> {(kind, scope): limiter}; loops are held weakly so closed loops drop out.
+_semaphores: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[str, str], EndpointLimiter]]" = (
     weakref.WeakKeyDictionary()
 )
 # Warnings already logged, so each is logged once.
-_resize_warned: set[tuple[str, str, int, int]] = set()
 _reserve_warned: set[tuple[str, int, int]] = set()
+_streams_alone_warned: set[str] = set()
 
 
 def validate_max_concurrent(value: int | None, *, name: str = "max_concurrent") -> int | None:
@@ -105,10 +106,22 @@ def register_limit(scope: str, max_concurrent: int | None, *, label: str = "", k
 
 
 def _check_stream_reserve(scope: str) -> None:
-    """Warn once when the streams limit leaves no slot for blocking calls. Holds ``_lock``."""
+    """Warn once when the streams limit does not reserve a blocking slot. Holds ``_lock``."""
     streams = _limits.get((STREAMS, scope))
     requests = _limits.get((REQUESTS, scope))
-    if streams is None or requests is None or streams < requests:
+    if streams is None:
+        return
+    if requests is None:
+        if scope in _streams_alone_warned:
+            return
+        _streams_alone_warned.add(scope)
+        logger.warning(
+            "llm-mesh: max_concurrent_streams=%s is set without max_concurrent; "
+            "streams are capped, blocking calls are not",
+            streams,
+        )
+        return
+    if streams < requests:
         return
     if (scope, streams, requests) in _reserve_warned:
         return
@@ -121,17 +134,72 @@ def _check_stream_reserve(scope: str) -> None:
     )
 
 
+class EndpointLimiter:
+    """Async limiter whose capacity follows the registered limit.
+
+    ``asyncio.Semaphore`` cannot shrink. Each acquire reads the current limit,
+    so a limit lowered after this object was created applies to the next
+    acquire. Slots already held are not revoked.
+
+    The limiter does not store the event loop. ``asyncio.Semaphore`` keeps
+    ``_loop`` after the first wait, and a registry keyed weakly by that loop
+    would then retain every closed loop (registry → semaphore → loop).
+    Waiters are futures dropped as soon as they are resumed.
+    """
+
+    def __init__(self, kind: str, scope: str) -> None:
+        self._kind = kind
+        self._scope = scope
+        self._held = 0
+        self._waiters: list[asyncio.Future[None]] = []
+
+    @property
+    def limit(self) -> int | None:
+        return scope_limit(self._scope, self._kind)
+
+    def locked(self) -> bool:
+        """True when a new acquire would wait."""
+        limit = self.limit
+        return limit is not None and self._held >= limit
+
+    def _wake(self) -> None:
+        waiters = self._waiters
+        self._waiters = []
+        for fut in waiters:
+            if not fut.done():
+                fut.set_result(None)
+
+    async def __aenter__(self) -> EndpointLimiter:
+        while True:
+            limit = self.limit
+            if limit is None or self._held < limit:
+                self._held += 1
+                return self
+            fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            self._waiters.append(fut)
+            try:
+                await fut
+            except asyncio.CancelledError:
+                if fut in self._waiters:
+                    self._waiters.remove(fut)
+                raise
+
+    async def __aexit__(self, *_exc: object) -> None:
+        self._held -= 1
+        self._wake()
+
+
 def scope_limit(scope: str, kind: str = REQUESTS) -> int | None:
     """The registered limit of a scope, or None when no client set one."""
     with _lock:
         return _limits.get((kind, scope))
 
 
-def scope_semaphore(scope: str, kind: str = REQUESTS) -> asyncio.Semaphore | None:
-    """The scope's semaphore in the running loop, or None without a limit.
+def scope_semaphore(scope: str, kind: str = REQUESTS) -> EndpointLimiter | None:
+    """The scope's limiter in the running loop, or None without a limit.
 
-    With a limit it must be called from a coroutine: the semaphore is bound to
-    the running loop.
+    With a limit it must be called from a coroutine: waiters are bound to the
+    running loop. The limiter reads the registered limit on each acquire.
     """
     key = (kind, scope)
     with _lock:
@@ -139,26 +207,17 @@ def scope_semaphore(scope: str, kind: str = REQUESTS) -> asyncio.Semaphore | Non
             return None
     loop = asyncio.get_running_loop()
     with _lock:
-        limit = _limits.get(key)
-        if limit is None:
+        if _limits.get(key) is None:
             return None
         per_loop = _semaphores.get(loop)
         if per_loop is None:
             per_loop = {}
             _semaphores[loop] = per_loop
-        entry = per_loop.get(key)
-        if entry is None:
-            entry = (asyncio.Semaphore(limit), limit)
-            per_loop[key] = entry
-        elif entry[1] != limit and (kind, scope, entry[1], limit) not in _resize_warned:
-            _resize_warned.add((kind, scope, entry[1], limit))
-            logger.warning(
-                "llm-mesh: endpoint limit lowered to %s after its semaphore of size %s was created; "
-                "the existing semaphore keeps its size in this event loop",
-                limit,
-                entry[1],
-            )
-        return entry[0]
+        limiter = per_loop.get(key)
+        if limiter is None:
+            limiter = EndpointLimiter(kind, scope)
+            per_loop[key] = limiter
+        return limiter
 
 
 def reset_limits() -> None:
@@ -166,5 +225,5 @@ def reset_limits() -> None:
     with _lock:
         _limits.clear()
         _semaphores.clear()
-        _resize_warned.clear()
         _reserve_warned.clear()
+        _streams_alone_warned.clear()
