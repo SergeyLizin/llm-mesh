@@ -71,13 +71,50 @@ from llm_mesh.types import (
 logger = logging.getLogger(__name__)
 
 
-# File name extensions GigaChat accepts for uploaded images, by media type.
-_IMAGE_EXTENSIONS = {
+# File name extensions GigaChat accepts for uploaded files, by media type.
+_UPLOAD_EXTENSIONS = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
     "image/gif": ".gif",
     "image/webp": ".webp",
+    "audio/mp4": ".mp4",
+    "audio/mp3": ".mp3",
+    "audio/mpeg": ".mp3",
+    "audio/x-m4a": ".m4a",
+    "audio/x-wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/wav": ".wav",
+    "audio/x-pn-wav": ".wav",
+    "audio/webm": ".weba",
+    "audio/ogg": ".ogg",
+    "audio/x-ogg": ".ogg",
+    "audio/opus": ".opus",
+    "application/pdf": ".pdf",
+    "text/plain": ".txt",
 }
+
+
+def _gigachat_uploads(request: LLMRequest) -> list[tuple[str, bytes, str]]:
+    """(filename, bytes, media type) for images, then audio, then documents."""
+    rows: list[tuple[str, bytes, str]] = []
+
+    def add(kind: str, index: int, data: bytes | None, media_type: str | None) -> None:
+        if data is None:
+            raise LLMValidationError(
+                f"GigaChat: {kind} URLs are not supported; pass {kind} bytes"
+            )
+        ext = _UPLOAD_EXTENSIONS.get(media_type or "")
+        if ext is None:
+            raise LLMValidationError(f"GigaChat: unsupported {kind} type {media_type}")
+        rows.append((f"{kind}{index}{ext}", data, media_type or ""))
+
+    for index, image in enumerate(request.images):
+        add("image", index, image.data, image.media_type)
+    for index, clip in enumerate(request.audio):
+        add("audio", index, clip.data, clip.media_type)
+    for index, document in enumerate(request.documents):
+        add("document", index, document.data, document.media_type)
+    return rows
 
 
 def _check_response_canary(response_text: str, context: str = "") -> None:
@@ -168,12 +205,13 @@ class GigaChatClient(BaseLLMClient):
     ``LLM_EXTRA_HEADERS`` merge onto chat requests; fields the client
     already set win.
 
-    Images (``LLMRequest.images``) are sent on the text paths
+    Images, audio, and documents are sent on the text paths
     (``generate_text``, ``generate_stream``, ``generate_stream_events``): each
-    image is uploaded to ``/files`` and referenced by id in the user turn's
-    ``attachments``; the uploaded files are deleted after the call. Image URLs
-    are not accepted, only bytes. Structured output (legacy functions chat) and
-    batches have no image input and raise ``LLMValidationError`` before any HTTP.
+    file is uploaded to ``/files`` and referenced by id in the user turn's
+    ``attachments``; the uploaded files are deleted after the call. URLs are
+    not accepted, only bytes. Video is not a GigaChat file type. Structured
+    output (legacy functions chat) and batches have no media input and raise
+    ``LLMValidationError`` before any HTTP.
     """
 
     # TOOLS_REQUIRED is absent. generate_structured raises LLMValidationError
@@ -341,57 +379,60 @@ class GigaChatClient(BaseLLMClient):
 
     @staticmethod
     def _reject_images(request: LLMRequest) -> None:
-        if request.images:
+        from llm_mesh.types import has_attachments
+
+        if has_attachments(request):
             raise LLMValidationError(
-                "GigaChat: legacy functions chat has no image input; "
-                "images are supported in text mode (generate_text, streams)"
+                "GigaChat: legacy functions chat has no media input; "
+                "images, audio, and documents are supported in text mode "
+                "(generate_text, streams)"
             )
 
     # --- Images: /files upload + attachments ---------------------------------
 
     async def _attach_images(self, request: LLMRequest, body: dict[str, Any]) -> list[str]:
-        """Upload the request's images and reference them in the user turn.
+        """Upload images, audio, and documents and reference them in the user turn.
 
         Returns the uploaded file ids; the caller deletes them with
-        ``_delete_files`` when the call is over. A request with no images
-        uploads nothing. An image given by URL raises ``LLMValidationError``
-        before any upload.
+        ``_delete_files`` when the call is over. A request with no such
+        files uploads nothing. A URL or a video raises ``LLMValidationError``
+        before any upload. Ids are images, then audio, then documents.
         """
-        if not request.images:
+        if request.video:
+            raise LLMValidationError("GigaChat: video input is not supported")
+        uploads = _gigachat_uploads(request)
+        if not uploads:
             return []
-        if any(image.data is None for image in request.images):
-            raise LLMValidationError("GigaChat: image URLs are not supported; pass image bytes")
         messages = body.get("messages") or []
         if not messages or messages[-1].get("role") != "user":
-            raise LLMValidationError("GigaChat: images need a user turn to attach to")
+            raise LLMValidationError("GigaChat: files need a user turn to attach to")
         file_ids: list[str] = []
         try:
-            for index, image in enumerate(request.images):
-                file_ids.append(await self._upload_file(image.data or b"", image.media_type or "image/png", index))
+            for filename, data, media_type in uploads:
+                file_ids.append(await self._upload_file(data, media_type, filename))
         except BaseException:
             await self._delete_files(file_ids)
             raise
         user = messages[-1]
         content = user.get("content")
         if isinstance(content, list):
-            # build_text_messages renders images as OpenAI image_url parts; GigaChat takes
-            # plain text content plus file ids, so keep only the text parts.
+            # The GigaChat builder leaves a string. Flatten a leftover parts
+            # list to text so a file id is never paired with an OpenAI part.
             user["content"] = "".join(
                 part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
             )
         user["attachments"] = list(file_ids)
         return file_ids
 
-    async def _upload_file(self, data: bytes, media_type: str, index: int) -> str:
+    async def _upload_file(self, data: bytes, media_type: str, filename: str) -> str:
         """POST /files (purpose=general) under the endpoint limit; returns the file id."""
         sem = self._ensure_semaphore()
         if sem is None:
-            return await self._do_upload_file(data, media_type, index)
+            return await self._do_upload_file(data, media_type, filename)
         async with sem:
-            return await self._do_upload_file(data, media_type, index)
+            return await self._do_upload_file(data, media_type, filename)
 
-    async def _do_upload_file(self, data: bytes, media_type: str, index: int) -> str:
-        ext = _IMAGE_EXTENSIONS.get(media_type, ".png")
+    async def _do_upload_file(self, data: bytes, media_type: str, filename: str) -> str:
         url = f"{self._api_url}/files"
         token = await self._ensure_token()
         client = self._ensure_http()
@@ -405,7 +446,7 @@ class GigaChatClient(BaseLLMClient):
                 headers.pop("Content-Type", None)
                 resp = await client.post(
                     url,
-                    files={"file": (f"image{index}{ext}", data, media_type)},
+                    files={"file": (filename, data, media_type)},
                     data={"purpose": "general"},
                     headers=headers,
                     **self._timeout_kw(),
@@ -1025,7 +1066,9 @@ class GigaChatClient(BaseLLMClient):
         request = self._guarded_request(request)
         body = {
             "model": self._effective_model(request),
-            "messages": _build_text_messages(request, tool_turns=False),
+            "messages": _build_text_messages(
+                request, tool_turns=False, openai_attachments=False,
+            ),
             "max_tokens": self._clip_max_tokens(request.max_tokens, self._effective_model(request)),
         }
         self._apply_sampling(body, request.temperature)
@@ -1110,7 +1153,9 @@ class GigaChatClient(BaseLLMClient):
         request = self._guarded_request(request)
         body: dict[str, Any] = {
             "model": self._effective_model(request),
-            "messages": _build_text_messages(request, tool_turns=False),
+            "messages": _build_text_messages(
+                request, tool_turns=False, openai_attachments=False,
+            ),
             "max_tokens": self._clip_max_tokens(request.max_tokens, self._effective_model(request)),
             "stream": True,
         }
@@ -1283,7 +1328,9 @@ class GigaChatClient(BaseLLMClient):
         """
         self._reject_images(request)
         messages = (self._legacy_messages(request) if self._tool_choice == "auto"
-                    else _build_text_messages(request, tool_turns=False))
+                    else _build_text_messages(
+                        request, tool_turns=False, openai_attachments=False,
+                    ))
         body: dict[str, Any] = {
             "model": self._effective_model(request),
             "messages": messages,
@@ -1511,7 +1558,9 @@ class GigaChatClient(BaseLLMClient):
         request = self._guarded_request(request)
         body: dict[str, Any] = {
             "model": self._effective_model(request),
-            "messages": _build_text_messages(request, tool_turns=False),
+            "messages": _build_text_messages(
+                request, tool_turns=False, openai_attachments=False,
+            ),
             "max_tokens": self._clip_max_tokens(request.max_tokens, self._effective_model(request)),
             "stream": True,
         }

@@ -525,6 +525,8 @@ class OpenAIClient(BaseLLMClient):
         return ""
 
     def _messages(self, request: LLMRequest) -> list[dict[str, Any]]:
+        if request.video:
+            raise LLMValidationError("OpenAI: chat completions have no video input")
         return build_text_messages(request)
 
     def _clip_max_tokens(self, requested: int) -> int:

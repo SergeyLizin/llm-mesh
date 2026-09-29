@@ -341,18 +341,24 @@ Usage of the two attempts is added. Cache fields keep the attempt that reported 
 
 Batch clients and `count_tokens` stay on the constructor timeout. They honor a per-call timeout only where the underlying method already accepts one.
 
-## Images
+## Media
 
-`LLMRequest.images` attaches images to the current user turn. History turns stay text. An empty list is the text-only body, byte for byte.
+`LLMRequest.images`, `audio`, `video`, and `documents` attach files to the current user turn. History turns stay text. Empty lists are the text-only body, byte for byte. A client that cannot send a given kind raises `LLMValidationError` before HTTP, so the file is not dropped and answered as text.
 
-| Client | `data` | `url` |
-| --- | --- | --- |
-| OpenAI | `data:` URL in an `image_url` part | `image_url` part |
-| Anthropic | base64 `source` (`anthropic-version` `2023-06-01` accepts it) | `source` type `url` on that same version |
-| Gemini | `inlineData` part (`mimeType`, camelCase like the rest of the body) | rejected: generateContent has no public-URL image input |
-| GigaChat | uploaded to `/files` (`purpose=general`), referenced by id in the user turn's `attachments`, deleted after the call; text paths only (`generate_text`, streams) | rejected: pass bytes |
+| Kind | OpenAI | Anthropic | Gemini | GigaChat |
+| --- | --- | --- | --- | --- |
+| Image bytes | `data:` URL in an `image_url` part | base64 `source` (`anthropic-version` `2023-06-01`) | `inlineData` (`mimeType`, camelCase) | `/files` upload, id in `attachments`, deleted after the call. Text paths only |
+| Image URL | `image_url` part | `source` type `url` | rejected | rejected |
+| Audio bytes | `input_audio`, wav or mp3 only | rejected | `inlineData` (wav, mp3, aiff, aac, ogg, flac) | `/files` upload on text paths. Also mp4, m4a, webm, ogg, opus |
+| Audio URL | rejected | rejected | rejected | rejected |
+| Video bytes | rejected | rejected | `inlineData` (mp4, mpeg, quicktime, avi, flv, mpg, webm, wmv, 3gpp) | rejected |
+| Video URL | rejected | rejected | rejected | rejected |
+| PDF / plain text bytes | PDF is a `file` part (`file_data` data URL). Plain text is a `text` part: Chat Completions file inputs accept PDF only | PDF base64 document; plain text is a `text` source | `inlineData` | `/files` upload on text paths. The chat body stays text; OpenAI part serializers are not used |
+| PDF URL | rejected | PDF `source` type `url` | rejected | rejected |
 
-GigaChat structured output (legacy functions chat) and GigaChat batches have no image input and raise `LLMValidationError` before any HTTP. Uploads count against the endpoint's concurrency limit and use the same token refresh and retry rules as chat; deleting the uploaded file is best-effort and only logged on failure. `media_type` defaults to `image/png` for bytes and must be png, jpeg, gif, or webp. The canary scans text only. The request guard sees the attachments and may refuse them. Metrics records are unchanged.
+Image `media_type` defaults to `image/png`. Audio, video, and documents require `media_type` when bytes are set. Image types are png, jpeg, gif, and webp. Document types are `application/pdf` and `text/plain`. Office files are not a part kind.
+
+GigaChat structured output (legacy functions chat) and GigaChat batches have no media input and raise `LLMValidationError` before any HTTP. Uploads count against the endpoint's concurrency limit and use the same token refresh and retry rules as chat; deleting the uploaded file is best-effort and only logged on failure. The canary scans text only. The request guard sees the attachments and may refuse them. Metrics records are unchanged.
 
 ## Adding a provider
 

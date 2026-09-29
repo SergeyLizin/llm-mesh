@@ -377,12 +377,17 @@ def build_messages(
     user = request.user
     if user_suffix:
         user = f"{user}\n\n{user_suffix}" if user else user_suffix
-    if request.images:
+    if request.audio:
+        raise LLMValidationError("Anthropic: Messages API has no audio input")
+    if request.video:
+        raise LLMValidationError("Anthropic: Messages API has no video input")
+    if request.images or request.documents:
         # Current user turn only. History is already flushed above.
         blocks: list[dict[str, Any]] = []
         if user:
             blocks.append({"type": "text", "text": user})
         blocks.extend(image.anthropic_block() for image in request.images)
+        blocks.extend(document.anthropic_block() for document in request.documents)
         append("user", blocks)
     elif user or not messages or messages[-1]["role"] != "user":
         append("user", user)

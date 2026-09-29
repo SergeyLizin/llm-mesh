@@ -475,11 +475,14 @@ def build_contents(request: LLMRequest) -> tuple[str, list[dict[str, Any]]]:
     if contents and contents[0]["role"] != "user":
         contents.insert(0, {"role": "user", "parts": [{"text": _LEADING_USER_TEXT}]})
     user = request.user
-    if request.images:
+    if request.images or request.audio or request.video or request.documents:
         # Current user turn only. A public URL is rejected here: this client
         # has no file_data path, and generateContent does not fetch one.
         parts: list[dict[str, Any]] = [{"text": user}] if user else []
         parts.extend(image.gemini_part() for image in request.images)
+        parts.extend(clip.gemini_part() for clip in request.audio)
+        parts.extend(clip.gemini_part() for clip in request.video)
+        parts.extend(document.gemini_part() for document in request.documents)
         append("user", parts)
     elif user or not contents or contents[-1]["role"] != "user":
         append("user", [{"text": user}] if user else [])

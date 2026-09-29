@@ -117,51 +117,125 @@ class LLMRequest(BaseModel):
     # constructor-scoped.
     timeout_s: float | None = None
     max_retries: int | None = None
-    # Images on the current user turn. An empty list is text-only and does
-    # not change the request body. History turns are not image carriers.
+    # Media on the current user turn. Empty lists are text-only and do not
+    # change the request body. History turns are not media carriers.
     # The canary scans system text, user text, and model output. It does
-    # not read image bytes. Image bytes are not written to logs.
+    # not read attachment bytes. Those bytes are not written to logs.
     images: list["ImageAttachment"] = Field(default_factory=list)
+    audio: list["AudioAttachment"] = Field(default_factory=list)
+    video: list["VideoAttachment"] = Field(default_factory=list)
+    documents: list["DocumentAttachment"] = Field(default_factory=list)
+
+
+def has_attachments(request: "LLMRequest") -> bool:
+    """True when the current user turn carries any image, audio, video, or document."""
+    return bool(request.images or request.audio or request.video or request.documents)
 
 
 _IMAGE_MEDIA_TYPES = frozenset({
     "image/png", "image/jpeg", "image/gif", "image/webp",
 })
+# Union of types at least one client can send. A client that cannot send a
+# listed type raises LLMValidationError before HTTP.
+_AUDIO_MEDIA_TYPES = frozenset({
+    "audio/wav", "audio/x-wav", "audio/wave", "audio/x-pn-wav",
+    "audio/mpeg", "audio/mp3",
+    "audio/aiff", "audio/aac", "audio/ogg", "audio/flac",
+    "audio/mp4", "audio/x-m4a", "audio/webm", "audio/x-ogg", "audio/opus",
+})
+_VIDEO_MEDIA_TYPES = frozenset({
+    "video/mp4", "video/mpeg", "video/quicktime", "video/avi",
+    "video/x-flv", "video/mpg", "video/webm", "video/wmv", "video/3gpp",
+})
+_DOCUMENT_MEDIA_TYPES = frozenset({
+    "application/pdf", "text/plain",
+})
+# Chat Completions input_audio.format is only wav or mp3.
+_OPENAI_AUDIO_FORMAT = {
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/wave": "wav",
+    "audio/x-pn-wav": "wav",
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+}
+# generateContent inline audio. Other audio types stay constructable for GigaChat.
+_GEMINI_AUDIO_TYPES = frozenset({
+    "audio/wav", "audio/mp3", "audio/mpeg", "audio/aiff",
+    "audio/aac", "audio/ogg", "audio/flac",
+})
 
 
-class ImageAttachment(BaseModel):
-    """One image on the current user turn. Exactly one of ``url`` or ``data``.
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
 
-    ``media_type`` defaults to ``image/png`` when ``data`` is set. A set
-    type must be png, jpeg, gif, or webp. The canary does not scan the
-    bytes, and nothing in the library logs them.
+
+class _MediaAttachment(BaseModel):
+    """Bytes or a URL on the current user turn. Exactly one of the two.
+
+    ``media_type`` is required for bytes unless the subclass sets a default.
+    A set type must be in the subclass allowlist. The canary does not scan
+    the bytes, and nothing in the library logs them.
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    _allowed: ClassVar[frozenset[str]]
+    _default_media_type: ClassVar[str | None] = None
+    _label: ClassVar[str] = "attachment"
 
     url: str | None = None
     data: bytes | None = None
     media_type: str | None = None
 
     @model_validator(mode="after")
-    def _one_source(self) -> "ImageAttachment":
+    def _one_source(self) -> "_MediaAttachment":
         has_url = self.url is not None
         has_data = self.data is not None
+        label = type(self)._label
         if has_url == has_data:
-            raise ValueError("ImageAttachment requires exactly one of url or data")
+            raise ValueError(f"{label} requires exactly one of url or data")
         if has_data and not self.media_type:
-            self.media_type = "image/png"
-        if self.media_type is not None and self.media_type not in _IMAGE_MEDIA_TYPES:
-            allowed = ", ".join(sorted(_IMAGE_MEDIA_TYPES))
-            raise ValueError(f"media_type must be one of {allowed}")
+            default = type(self)._default_media_type
+            if default is None:
+                raise ValueError(f"{label} requires media_type when data is set")
+            self.media_type = default
+        allowed = type(self)._allowed
+        if self.media_type is not None and self.media_type not in allowed:
+            names = ", ".join(sorted(allowed))
+            raise ValueError(f"media_type must be one of {names}")
         return self
+
+    def _gemini_inline(self, kind: str) -> dict[str, Any]:
+        if self.url is not None:
+            raise LLMValidationError(
+                f"Gemini: generateContent has no public-URL {kind} input; "
+                f"pass {kind} bytes"
+            )
+        return {
+            "inlineData": {
+                "mimeType": self.media_type,
+                "data": _b64(self.data or b""),
+            },
+        }
+
+
+class ImageAttachment(_MediaAttachment):
+    """One image on the current user turn.
+
+    ``media_type`` defaults to ``image/png`` when ``data`` is set. A set
+    type must be png, jpeg, gif, or webp.
+    """
+
+    _allowed = _IMAGE_MEDIA_TYPES
+    _default_media_type = "image/png"
+    _label = "ImageAttachment"
 
     def openai_url(self) -> str:
         """URL for an OpenAI image_url part. Bytes become a data URL."""
         if self.url is not None:
             return self.url
-        encoded = base64.b64encode(self.data or b"").decode("ascii")
-        return f"data:{self.media_type};base64,{encoded}"
+        return f"data:{self.media_type};base64,{_b64(self.data or b'')}"
 
     def anthropic_block(self) -> dict[str, Any]:
         """Messages API image block.
@@ -170,13 +244,12 @@ class ImageAttachment(BaseModel):
         sources. There is no newer version header; url was added on this one.
         """
         if self.data is not None:
-            encoded = base64.b64encode(self.data).decode("ascii")
             return {
                 "type": "image",
                 "source": {
                     "type": "base64",
                     "media_type": self.media_type,
-                    "data": encoded,
+                    "data": _b64(self.data),
                 },
             }
         return {
@@ -191,17 +264,141 @@ class ImageAttachment(BaseModel):
         ``generationConfig``. ``inline_data`` is ignored by the API, so the
         call would succeed as text and the image would never arrive.
         """
-        if self.url is not None:
+        return self._gemini_inline("image")
+
+
+class AudioAttachment(_MediaAttachment):
+    """One audio clip on the current user turn.
+
+    Bytes require ``media_type``. OpenAI chat audio is wav or mp3 only.
+    Gemini accepts wav, mp3, aiff, aac, ogg, and flac inline. GigaChat
+    uploads a wider set. Anthropic has no audio input.
+    """
+
+    _allowed = _AUDIO_MEDIA_TYPES
+    _label = "AudioAttachment"
+
+    def openai_part(self) -> dict[str, Any]:
+        """Chat Completions ``input_audio`` part. Raw base64, not a data URL."""
+        if self.data is None:
             raise LLMValidationError(
-                "Gemini: generateContent has no public-URL image input; "
-                "pass image bytes"
+                "OpenAI: audio input is base64 bytes; URLs are not supported"
+            )
+        fmt = _OPENAI_AUDIO_FORMAT.get(self.media_type or "")
+        if fmt is None:
+            raise LLMValidationError(
+                "OpenAI: input_audio format must be wav or mp3, "
+                f"not {self.media_type}"
             )
         return {
-            "inlineData": {
-                "mimeType": self.media_type,
-                "data": base64.b64encode(self.data or b"").decode("ascii"),
+            "type": "input_audio",
+            "input_audio": {"data": _b64(self.data), "format": fmt},
+        }
+
+    def gemini_part(self) -> dict[str, Any]:
+        if self.url is None and self.media_type not in _GEMINI_AUDIO_TYPES:
+            raise LLMValidationError(
+                f"Gemini: unsupported audio type {self.media_type}"
+            )
+        return self._gemini_inline("audio")
+
+
+class VideoAttachment(_MediaAttachment):
+    """One video on the current user turn.
+
+    Only Gemini generateContent accepts it, as inline bytes. OpenAI chat
+    completions, Anthropic, and GigaChat reject video before HTTP.
+    """
+
+    _allowed = _VIDEO_MEDIA_TYPES
+    _label = "VideoAttachment"
+
+    def gemini_part(self) -> dict[str, Any]:
+        return self._gemini_inline("video")
+
+
+class DocumentAttachment(_MediaAttachment):
+    """One document on the current user turn. PDF or UTF-8 plain text.
+
+    Office formats (docx, pptx, xlsx) are not a part kind here: only GigaChat
+    uploads them, and a request built for the other clients would have nowhere
+    to go.
+    """
+
+    _allowed = _DOCUMENT_MEDIA_TYPES
+    _label = "DocumentAttachment"
+
+    def openai_part(self) -> dict[str, Any]:
+        """Chat Completions part for this document.
+
+        A ``file`` part accepts PDF only. Plain text is a ``text`` part: the
+        same guide rejects ``document.txt`` file inputs. PDF ``file_data`` is
+        the data URL from the file-input guide. URLs are not a file part;
+        ``file_id`` is an upload this client does not perform.
+        """
+        if self.media_type == "text/plain":
+            if self.data is None:
+                raise LLMValidationError(
+                    "OpenAI: text/plain documents are inline UTF-8; URLs are not supported"
+                )
+            try:
+                text = self.data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise LLMValidationError(
+                    "OpenAI: text/plain document must be UTF-8"
+                ) from exc
+            return {"type": "text", "text": text}
+        if self.data is None:
+            raise LLMValidationError(
+                "OpenAI: file input is base64 bytes; URLs are not supported"
+            )
+        encoded = _b64(self.data)
+        return {
+            "type": "file",
+            "file": {
+                "filename": "document.pdf",
+                "file_data": f"data:application/pdf;base64,{encoded}",
             },
         }
+
+    def anthropic_block(self) -> dict[str, Any]:
+        """Messages API document block.
+
+        PDF is base64 or a url source. Plain text is a ``text`` source whose
+        ``data`` is the UTF-8 string, not base64. A plain-text URL is not a
+        document source.
+        """
+        if self.media_type == "text/plain":
+            if self.data is None:
+                raise LLMValidationError(
+                    "Anthropic: text/plain documents are inline UTF-8; URLs are not supported"
+                )
+            try:
+                text = self.data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise LLMValidationError(
+                    "Anthropic: text/plain document must be UTF-8"
+                ) from exc
+            return {
+                "type": "document",
+                "source": {"type": "text", "media_type": "text/plain", "data": text},
+            }
+        if self.data is not None:
+            return {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": _b64(self.data),
+                },
+            }
+        return {
+            "type": "document",
+            "source": {"type": "url", "url": self.url},
+        }
+
+    def gemini_part(self) -> dict[str, Any]:
+        return self._gemini_inline("document")
 
 
 LLMRequest.model_rebuild()

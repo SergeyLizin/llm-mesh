@@ -345,7 +345,7 @@ async def test_gigachat_rejects_image_urls_and_structured_images_before_http():
                 system="s", user="look", mode="text",
                 images=[ImageAttachment(url="https://img.example/a.png")],
             ))
-        with pytest.raises(LLMValidationError, match="no image input"):
+        with pytest.raises(LLMValidationError, match="no media input"):
             await client.generate_structured(LLMRequest(
                 system="s", user="look", schema={"type": "object", "properties": {}},
                 images=[ImageAttachment(data=PNG)],
@@ -498,7 +498,7 @@ async def test_gigachat_batch_rejects_images_before_upload():
     )
     client = GigaChatBatchClient(token="dummy")
     try:
-        with pytest.raises(LLMValidationError, match="batches have no image input"):
+        with pytest.raises(LLMValidationError, match="batches have no media input"):
             await client.run_chat_batch([LLMRequest(
                 system="s", user="look", images=[ImageAttachment(data=PNG)],
             )])

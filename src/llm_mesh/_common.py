@@ -137,13 +137,17 @@ def stamp_validation_reask(prior: LLMUsage, response: LLMResponse) -> LLMRespons
 
 
 def build_text_messages(
-    request: LLMRequest, *, tool_turns: bool = True,
+    request: LLMRequest, *, tool_turns: bool = True, openai_attachments: bool = True,
 ) -> list[dict[str, Any]]:
     """Build [system, *history, user] messages. Preserve user/assistant text, assistant tool_calls,
     and tool results linked by tool_call_id; discard other roles. Strict providers require the
     parent assistant tool-call turn before its results. With tool_turns=False, discard both tool
     results and assistant tool-call turns entirely: legacy GigaChat functions do not support the
     OpenAI tool role.
+
+    ``openai_attachments=False`` leaves the user turn as a string. GigaChat uploads
+    files itself and must not run OpenAI part serializers: those reject audio types
+    GigaChat accepts, before any upload.
     """
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": apply_canary(request.system)}
@@ -169,15 +173,19 @@ def build_text_messages(
             })
         elif role in ("user", "assistant"):
             messages.append({"role": role, "content": str(turn.get("content", ""))})
-    # Images ride on the current user turn only. An empty list keeps the
+    # Media rides on the current user turn only. Empty lists keep the
     # string content, so a text-only body stays byte-for-byte the same.
-    if request.images:
+    # Video is not a chat-completions part. The OpenAI client rejects it
+    # before this body is posted.
+    if openai_attachments and (request.images or request.audio or request.documents):
         parts: list[dict[str, Any]] = [
             {"type": "text", "text": request.user},
             *[
                 {"type": "image_url", "image_url": {"url": image.openai_url()}}
                 for image in request.images
             ],
+            *[audio.openai_part() for audio in request.audio],
+            *[document.openai_part() for document in request.documents],
         ]
         messages.append({"role": "user", "content": parts})
     else:
