@@ -1,56 +1,31 @@
 [
   {
-    "id": "gigachat2-light",
-    "title": "GigaChat-2 (Light)",
-    "kind": "gigachat",
-    "legacy_functions": true,
-    "max_tokens": 4096,
-    "providers": [
-      {
-        "name": "gigachat",
-        "model": "GigaChat-2",
-        "base_url_env": "GIGACORP_BASE_URL",
-        "api_key_env": "GIGACORP_API_KEY",
-        "scope_env": "GIGACORP_SCOPE",
-        "eval_concurrency": 5
-      }
-    ],
-    "notes": "Configure the endpoint and credentials through the declared environment variables. Connection reuse can affect effective concurrency limits. Provider eval_concurrency is informational; configure the client limit with LLM_MAX_CONCURRENT."
-  },
-  {
     "id": "gigachat2-max",
     "title": "GigaChat-2-Max",
-    "kind": "gigachat",
-    "legacy_functions": true,
+    "kind": "openai",
     "max_tokens": 16384,
     "providers": [
       {
-        "name": "gigachat",
-        "model": "GigaChat-2-Max",
-        "base_url_env": "GIGACORP_BASE_URL",
-        "api_key_env": "GIGACORP_API_KEY",
-        "scope_env": "GIGACORP_SCOPE",
-        "eval_concurrency": 5
-      }
-    ],
-    "notes": "Production tier."
-  },
-  {
-    "id": "gigachat2-pro",
-    "title": "GigaChat-2-Pro",
-    "kind": "gigachat",
-    "legacy_functions": true,
-    "max_tokens": 8192,
-    "providers": [
-      {
-        "name": "gigachat",
-        "model": "GigaChat-2-Pro",
-        "base_url_env": "GIGACORP_BASE_URL",
-        "api_key_env": "GIGACORP_API_KEY",
-        "scope_env": "GIGACORP_SCOPE",
-        "eval_concurrency": 5
+        "name": "cloudru",
+        "model": "GigaChat/GigaChat-2-Max",
+        "base_url_env": "CLOUDRU_BASE_URL",
+        "api_key_env": "CLOUDRU_API_KEY"
       }
     ]
+  },
+  {
+    "id": "gigachat3-pro-openai",
+    "title": "GigaChat-3-Pro",
+    "kind": "openai",
+    "providers": [
+      {
+        "name": "cloudru",
+        "model": "GigaChat/GigaChat-3-Pro",
+        "base_url_env": "CLOUDRU_BASE_URL",
+        "api_key_env": "CLOUDRU_API_KEY"
+      }
+    ],
+    "notes": "cloud.ru foundation-models, wire id GigaChat/GigaChat-3-Pro. Separate id from gigachat3-pro-ron/-roff so the legacy GigaPers family does not collapse."
   },
   {
     "id": "aliceai-llm",
@@ -193,8 +168,7 @@
           }
         }
       }
-    ],
-    "max_tokens": 8192
+    ]
   },
   {
     "id": "gemma4-31b-ultra-roff",
@@ -242,7 +216,7 @@
         }
       }
     ],
-    "max_tokens": 8192
+    "max_tokens": 32768
   },
   {
     "id": "gemma4-31b-turbo-roff",
