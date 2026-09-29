@@ -17,7 +17,13 @@ from llm_mesh.openai.batch import (
     OpenAIBatchError,
 )
 from llm_mesh.openai.client import OpenAIClient
-from llm_mesh.types import LLMRequest, LLMTimeoutError
+from llm_mesh.types import (
+    AudioAttachment,
+    LLMRequest,
+    LLMTimeoutError,
+    LLMValidationError,
+    VideoAttachment,
+)
 
 BASE = "https://api.openai.com/v1"
 
@@ -465,6 +471,160 @@ def test_batching_client_coalesces_two_structured_calls():
     assert len(uploads) == 1
     assert '"custom_id": "0"' in uploads[0]
     assert '"custom_id": "1"' in uploads[0]
+
+
+def _mixed_media() -> list[LLMRequest]:
+    return [
+        _req("plain"),
+        LLMRequest(
+            system="sys", user="watch", mode="text",
+            video=[VideoAttachment(data=b"v", media_type="video/mp4")],
+        ),
+        LLMRequest(
+            system="sys", user="listen", mode="text",
+            audio=[AudioAttachment(data=b"a", media_type="audio/opus")],
+        ),
+        LLMRequest(
+            system="sys", user="hear", mode="text",
+            audio=[AudioAttachment(data=b"w", media_type="audio/wav")],
+        ),
+    ]
+
+
+@respx.mock
+def test_attachment_refusal_stays_on_its_row():
+    uploads: list[str] = []
+
+    def on_upload(request: httpx.Request):
+        uploads.append(request.content.decode("utf-8", "replace"))
+        return httpx.Response(200, json={"id": "file_in"})
+
+    respx.post(f"{BASE}/files").mock(side_effect=on_upload)
+    respx.post(f"{BASE}/batches").mock(
+        return_value=httpx.Response(200, json={"id": "batch_1", "status": "validating"})
+    )
+    respx.get(f"{BASE}/batches/batch_1").mock(return_value=httpx.Response(200, json={
+        "id": "batch_1", "status": "completed", "output_file_id": "file_out",
+    }))
+    respx.get(f"{BASE}/files/file_out/content").mock(return_value=httpx.Response(
+        200, text=_jsonl([
+            _line("3", body=_completion("heard", model="m")),
+            _line("0", body=_completion("plain", model="m")),
+        ]),
+    ))
+
+    async def run():
+        bc = _batch()
+        try:
+            return await bc.run_chat_batch(_mixed_media(), return_exceptions=True)
+        finally:
+            await bc.aclose()
+
+    out = asyncio.run(run())
+    assert out[0].text == "plain"
+    assert isinstance(out[1], LLMValidationError)
+    assert "no video input" in str(out[1])
+    assert isinstance(out[2], LLMValidationError)
+    assert "wav or mp3" in str(out[2])
+    assert "no video input" not in str(out[2])
+    assert out[3].text == "heard"
+    assert len(uploads) == 1
+    assert '"custom_id": "0"' in uploads[0]
+    assert '"custom_id": "3"' in uploads[0]
+    assert '"custom_id": "1"' not in uploads[0]
+    assert '"custom_id": "2"' not in uploads[0]
+
+
+def test_attachment_refusal_raises_before_upload_without_return_exceptions():
+    posted: list[str] = []
+
+    async def run():
+        with respx.mock(assert_all_called=False) as router:
+            router.post(f"{BASE}/files").mock(
+                side_effect=lambda request: posted.append("files") or httpx.Response(
+                    200, json={"id": "file_in"},
+                ),
+            )
+            bc = _batch()
+            try:
+                await bc.run_chat_batch(_mixed_media(), return_exceptions=False)
+            finally:
+                await bc.aclose()
+
+    with pytest.raises(LLMValidationError, match="no video input"):
+        asyncio.run(run())
+    assert posted == []
+
+
+def test_attachment_refusals_skip_upload_when_every_row_is_refused():
+    posted: list[str] = []
+
+    async def run():
+        with respx.mock(assert_all_called=False) as router:
+            router.post(f"{BASE}/files").mock(
+                side_effect=lambda request: posted.append("files") or httpx.Response(
+                    200, json={"id": "file_in"},
+                ),
+            )
+            bc = _batch()
+            try:
+                return await bc.run_chat_batch(
+                    _mixed_media()[1:3], return_exceptions=True,
+                )
+            finally:
+                await bc.aclose()
+
+    out = asyncio.run(run())
+    assert posted == []
+    assert "no video input" in str(out[0])
+    assert "wav or mp3" in str(out[1])
+
+
+@respx.mock
+def test_batching_client_keeps_a_text_neighbor_when_one_row_has_video():
+    uploads: list[str] = []
+
+    def on_upload(request: httpx.Request):
+        uploads.append(request.content.decode("utf-8", "replace"))
+        return httpx.Response(200, json={"id": "file_in"})
+
+    respx.post(f"{BASE}/files").mock(side_effect=on_upload)
+    respx.post(f"{BASE}/batches").mock(
+        return_value=httpx.Response(200, json={"id": "batch_1", "status": "validating"})
+    )
+    respx.get(f"{BASE}/batches/batch_1").mock(return_value=httpx.Response(200, json={
+        "id": "batch_1", "status": "completed", "output_file_id": "file_out",
+    }))
+    respx.get(f"{BASE}/files/file_out/content").mock(return_value=httpx.Response(
+        200, text=_jsonl([_line("0", body=_completion("plain", model="m"))]),
+    ))
+
+    async def one(cli: BatchingLLMClient, request: LLMRequest):
+        try:
+            response = await cli.generate_text(request)
+            return response.text
+        except Exception as exc:  # noqa: BLE001 - the test records each row's own error
+            return f"{type(exc).__name__}: {exc}"
+
+    async def run():
+        cli = BatchingLLMClient(_batch(), model="client-model", max_delay_s=0.05)
+        try:
+            return await asyncio.gather(
+                one(cli, _req("plain")),
+                one(cli, _mixed_media()[1]),
+                one(cli, _mixed_media()[2]),
+            )
+        finally:
+            await cli.aclose()
+
+    text, video, opus = asyncio.run(run())
+    assert text == "plain"
+    assert video.startswith("LLMValidationError:") and "no video input" in video
+    assert opus.startswith("LLMValidationError:") and "wav or mp3" in opus
+    assert "no video input" not in opus
+    assert len(uploads) == 1
+    assert '"custom_id": "0"' in uploads[0]
+    assert '"custom_id": "1"' not in uploads[0]
 
 
 def test_catalog_openai_batch_mode_wraps_only_when_enabled(monkeypatch):

@@ -33,6 +33,7 @@ from llm_mesh.types import (
     LLMRequest,
     LLMResponse,
     LLMTimeoutError,
+    LLMValidationError,
 )
 
 from .client import OpenAIClient, OpenAIError
@@ -225,18 +226,50 @@ class OpenAIBatchClient:
             f"OpenAI Batch: attempts exhausted for {context} (status {last_status})"
         )
 
-    def build_chat_lines(
-        self, requests: Sequence[LLMRequest], *, model: str | None = None,
-        ids: Sequence[int] | None = None,
-    ) -> list[dict[str, Any]]:
-        """JSONL records in input order. Each line's model is ``request.model`` or the
-        batch default. The body is exactly ``OpenAIClient.build_completion_body``.
+    def _chat_line(
+        self, request: LLMRequest, *, custom_id: str, model: str | None,
+    ) -> dict[str, Any]:
+        """One JSONL record. The body is ``OpenAIClient.build_completion_body``.
+
+        A request the completion client refuses (video, an audio type other
+        than wav/mp3, a document URL, non-UTF-8 text) raises
+        ``LLMValidationError`` here, before any HTTP.
         """
         if self._openai is None:
             raise OpenAIBatchError(
                 "OpenAIBatchClient: a completion client is required to build request bodies"
             )
         resolved = model or self._openai._model
+        line_model = request.model or resolved
+        # Stamp the batch default onto the request so the body builder does not
+        # fall back to a different model configured on the client.
+        prepared = (
+            request if request.model
+            else request.model_copy(update={"model": line_model or None})
+        )
+        return {
+            "custom_id": custom_id,
+            "method": "POST",
+            "url": BATCH_ENDPOINT,
+            "body": self._openai.build_completion_body(
+                prepared, structured=request.mode != "text",
+            ),
+        }
+
+    def build_chat_lines(
+        self, requests: Sequence[LLMRequest], *, model: str | None = None,
+        ids: Sequence[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        """JSONL records in input order. Each line's model is ``request.model`` or the
+        batch default. The body is exactly ``OpenAIClient.build_completion_body``.
+
+        This helper returns lines only. A refusal raises. ``run_chat_batch``
+        catches that refusal per input row.
+        """
+        if self._openai is None:
+            raise OpenAIBatchError(
+                "OpenAIBatchClient: a completion client is required to build request bodies"
+            )
         if ids is not None and len(ids) != len(requests):
             raise OpenAIBatchError(
                 "OpenAIBatchClient: line ids must match the request list"
@@ -244,17 +277,7 @@ class OpenAIBatchClient:
         lines: list[dict[str, Any]] = []
         for n, req in enumerate(requests):
             i = n if ids is None else ids[n]
-            line_model = req.model or resolved
-            # Stamp the batch default onto the request so the body builder does not
-            # fall back to a different model configured on the client.
-            prepared = req if req.model else req.model_copy(update={"model": line_model or None})
-            structured = req.mode != "text"
-            lines.append({
-                "custom_id": str(i),
-                "method": "POST",
-                "url": BATCH_ENDPOINT,
-                "body": self._openai.build_completion_body(prepared, structured=structured),
-            })
+            lines.append(self._chat_line(req, custom_id=str(i), model=model))
         return lines
 
     def build_embedding_lines(
@@ -417,10 +440,14 @@ class OpenAIBatchClient:
         """Submit, poll, download, and map a chat batch. Responses follow input order.
 
         Per-item failures (top-level ``error``, non-200 ``response.status_code``, a
-        missing ``custom_id``, or a parse error) become ``OpenAIBatchError``. The
-        first one is raised unless ``return_exceptions`` is set, in which case each
-        sits at its input position. A sent/received count mismatch raises always:
-        the file cannot be mapped, so an empty success would be a fabrication.
+        missing ``custom_id``, or a parse error) become ``OpenAIBatchError``. A
+        request whose completion body is refused (``LLMValidationError``: video,
+        unsupported audio, a document the chat API will not carry) stays out of
+        the file and keeps that error. The first per-item failure is raised
+        unless ``return_exceptions`` is set, in which case each sits at its
+        input position. Neighbors keep their original indexes as ``custom_id``.
+        A sent/received count mismatch raises always: the file cannot be
+        mapped, so an empty success would be a fabrication.
         """
         if not requests:
             return []
@@ -437,11 +464,25 @@ class OpenAIBatchClient:
         )
         if not accepted:
             return [blocked[i] for i in range(len(requests))]
-        passing = [req for _, req in accepted]
-        self._check_request_count(passing)
-        lines = self.build_chat_lines(
-            passing, model=model, ids=[i for i, _ in accepted],
-        )
+        # A refused attachment must not fail the other rows. The coalescer
+        # always asks for return_exceptions, and one raise there is written
+        # onto every waiter in the window.
+        errors: dict[int, BaseException] = dict(blocked)
+        kept: list[tuple[int, LLMRequest]] = []
+        lines: list[dict[str, Any]] = []
+        for index, req in accepted:
+            try:
+                line = self._chat_line(req, custom_id=str(index), model=model)
+            except LLMValidationError as exc:
+                if not return_exceptions:
+                    raise
+                errors[index] = exc
+            else:
+                kept.append((index, req))
+                lines.append(line)
+        if not kept:
+            return [errors[i] for i in range(len(requests))]
+        self._check_request_count([req for _, req in kept])
         payload = self.build_jsonl(lines)
         self._check_payload_size(payload)
 
@@ -457,10 +498,10 @@ class OpenAIBatchClient:
                 f"status={status.get('status')!r})"
             )
         raw_results = await self.download_results(str(output_file_id))
-        if len(raw_results) != len(accepted):
+        if len(raw_results) != len(kept):
             raise OpenAIBatchError(
                 f"OpenAI Batch: result count mismatch "
-                f"(sent {len(accepted)} ids, received {len(raw_results)})"
+                f"(sent {len(kept)} ids, received {len(raw_results)})"
             )
 
         by_id: dict[str, dict[str, Any]] = {}
@@ -471,11 +512,11 @@ class OpenAIBatchClient:
             by_id[str(custom_id)] = entry
 
         resolved = model or self._openai._model
-        guarded = dict(accepted)
+        guarded = dict(kept)
         out: list[LLMResponse | BaseException] = []
         for i, _req in enumerate(requests):
-            if i in blocked:
-                out.append(blocked[i])
+            if i in errors:
+                out.append(errors[i])
                 continue
             req = guarded[i]
             entry = by_id.get(str(i))
