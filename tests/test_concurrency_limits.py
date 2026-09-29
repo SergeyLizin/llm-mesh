@@ -172,6 +172,130 @@ def test_streams_limit_from_catalog_route_options(monkeypatch, _no_env_stream_li
     assert (client._max_concurrent, client._max_concurrent_streams) == (8, 5)
 
 
+def test_waiting_request_is_not_passed_by_the_releaser():
+    """A queued acquire gets the freed slot before the releaser's next call."""
+    client = _openai(max_concurrent=1)
+
+    async def run():
+        limiter = client._ensure_semaphore()
+        assert limiter is not None
+        order: list[str] = []
+
+        async def queued() -> None:
+            async with limiter:
+                order.append("waiting request")
+
+        async with limiter:
+            waiter = asyncio.create_task(queued())
+            await asyncio.sleep(0)
+        for i in range(20):
+            async with limiter:
+                order.append(f"producer {i}")
+                await asyncio.sleep(0)
+        await waiter
+        return order
+
+    order = asyncio.run(run())
+    assert order[0] == "waiting request"
+
+
+def test_cancelled_waiter_does_not_keep_the_slot():
+    client = _openai(max_concurrent=1)
+
+    async def run() -> None:
+        limiter = client._ensure_semaphore()
+        assert limiter is not None
+
+        async def queued() -> None:
+            async with limiter:
+                await asyncio.Event().wait()
+
+        async with limiter:
+            waiter = asyncio.create_task(queued())
+            await asyncio.sleep(0)
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+        async with asyncio.timeout(1):
+            async with limiter:
+                return
+
+    asyncio.run(run())
+
+
+def test_equivalent_gemini_bases_share_one_limiter():
+    from llm_mesh.gemini.client import generate_content_url
+
+    bare = GeminiClient(
+        model="m", api_key="k", base_url="https://host", max_concurrent=1,
+    )
+    versioned = GeminiClient(
+        model="m", api_key="k", base_url="https://host/v1beta", max_concurrent=1,
+    )
+    assert generate_content_url(bare._base, "m") == generate_content_url(versioned._base, "m")
+    assert bare._limit_scope == versioned._limit_scope
+
+    async def run():
+        assert bare._ensure_semaphore() is versioned._ensure_semaphore()
+
+    asyncio.run(run())
+
+
+def test_gemini_alias_bases_share_one_http_slot():
+    import httpx
+
+    from llm_mesh.types import LLMRequest
+
+    active = 0
+    peak = 0
+    urls: list[str] = []
+    release = asyncio.Event()
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        urls.append(str(request.url))
+        try:
+            await release.wait()
+            return httpx.Response(
+                200,
+                json={
+                    "candidates": [{
+                        "content": {"parts": [{"text": "ok"}]},
+                        "finishReason": "STOP",
+                    }],
+                },
+            )
+        finally:
+            active -= 1
+
+    bases = ("https://test.invalid", "https://test.invalid/v1beta")
+    clients = [
+        GeminiClient(model="m", api_key="fake", base_url=base, max_concurrent=1)
+        for base in bases
+    ]
+
+    async def run() -> None:
+        for client in clients:
+            client._client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        tasks = [
+            asyncio.create_task(
+                client.generate_text(LLMRequest(system="s", user="u", mode="text"))
+            )
+            for client in clients
+        ]
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.gather(*tasks)
+        for client in clients:
+            await client.aclose()
+
+    asyncio.run(run())
+    assert len(set(urls)) == 1
+    assert peak == 1
+
+
 def test_anthropic_equivalent_bases_share_one_limiter():
     bare = AnthropicClient(
         model="m", api_key="k", base_url="https://host", max_concurrent=1,

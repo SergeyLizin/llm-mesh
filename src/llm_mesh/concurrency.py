@@ -145,6 +145,11 @@ class EndpointLimiter:
     ``_loop`` after the first wait, and a registry keyed weakly by that loop
     would then retain every closed loop (registry → semaphore → loop).
     Waiters are futures dropped as soon as they are resumed.
+
+    A released slot is handed to the oldest waiter and stays counted in
+    ``_held``. A later acquire cannot take that slot ahead of a request that
+    is already waiting; waking every waiter and racing them would let a tight
+    loop of new calls starve the queue.
     """
 
     def __init__(self, kind: str, scope: str) -> None:
@@ -152,6 +157,8 @@ class EndpointLimiter:
         self._scope = scope
         self._held = 0
         self._waiters: list[asyncio.Future[None]] = []
+        # Futures that already own a handed-off slot. They must not acquire again.
+        self._granted: set[asyncio.Future[None]] = set()
 
     @property
     def limit(self) -> int | None:
@@ -162,12 +169,28 @@ class EndpointLimiter:
         limit = self.limit
         return limit is not None and self._held >= limit
 
-    def _wake(self) -> None:
-        waiters = self._waiters
-        self._waiters = []
-        for fut in waiters:
-            if not fut.done():
-                fut.set_result(None)
+    def _release(self) -> None:
+        """Free one slot, or hand it to the oldest waiter."""
+        if self.limit is not None:
+            while self._waiters:
+                fut = self._waiters.pop(0)
+                if fut.done():
+                    continue
+                try:
+                    fut.set_result(None)
+                except asyncio.InvalidStateError:
+                    continue
+                # The waiter resumes only after this task yields, so the mark
+                # is visible before it returns from ``await``.
+                self._granted.add(fut)
+                return
+        self._held -= 1
+        if self.limit is None and self._waiters:
+            waiters = self._waiters
+            self._waiters = []
+            for fut in waiters:
+                if not fut.done():
+                    fut.set_result(None)
 
     async def __aenter__(self) -> EndpointLimiter:
         while True:
@@ -180,13 +203,18 @@ class EndpointLimiter:
             try:
                 await fut
             except asyncio.CancelledError:
-                if fut in self._waiters:
-                    self._waiters.remove(fut)
+                self._waiters = [waiter for waiter in self._waiters if waiter is not fut]
+                if fut in self._granted:
+                    # The slot was already handed over, then this wait was cancelled.
+                    self._granted.discard(fut)
+                    self._release()
                 raise
+            if fut in self._granted:
+                self._granted.discard(fut)
+                return self
 
     async def __aexit__(self, *_exc: object) -> None:
-        self._held -= 1
-        self._wake()
+        self._release()
 
 
 def scope_limit(scope: str, kind: str = REQUESTS) -> int | None:

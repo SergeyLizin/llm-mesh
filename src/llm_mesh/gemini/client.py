@@ -96,6 +96,18 @@ class GeminiError(LLMError):
         self.detail = detail
 
 
+def api_root(base_url: str) -> str:
+    """Versioned root shared by every request and by the concurrency scope.
+
+    ``https://host`` and ``https://host/v1beta`` both call ``/v1beta/...``.
+    A base that already ends in ``/v1beta`` or ``/v1`` is kept.
+    """
+    base = base_url.rstrip("/")
+    if base.endswith("/v1beta") or base.endswith("/v1"):
+        return base
+    return f"{base}/v1beta"
+
+
 def generate_content_url(
     base_url: str,
     model: str,
@@ -109,11 +121,7 @@ def generate_content_url(
     A base that already ends in ``/v1beta`` or ``/v1`` is kept. Other bases
     get ``/v1beta``. Streaming adds ``alt=sse``.
     """
-    base = base_url.rstrip("/")
-    if base.endswith("/v1beta") or base.endswith("/v1"):
-        root = base
-    else:
-        root = f"{base}/v1beta"
+    root = api_root(base_url)
     if embed:
         action = "batchEmbedContents"
     elif count:
@@ -542,10 +550,11 @@ class GeminiClient(BaseLLMClient):
         self._max_retries = _env_int_default("LLM_MAX_RETRIES", 3, logger=logger)
         self._retry_backoff_s = float(get_env("LLM_RETRY_BACKOFF_S", "1.0") or "1.0")
         # Outbound concurrency: explicit argument, LLM_MAX_CONCURRENT, then no limit.
-        # Shared by every client of the same base URL and key (llm_mesh.concurrency).
+        # The scope is the versioned API root, not the raw base: "https://host"
+        # and "https://host/v1beta" both call /v1beta/... and must share one limiter.
         self._bind_concurrency(
             max_concurrent,
-            base_url=self._base,
+            base_url=api_root(self._base),
             credential=self._key,
             max_concurrent_streams=max_concurrent_streams,
         )
