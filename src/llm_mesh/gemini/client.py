@@ -1306,36 +1306,38 @@ class GeminiClient(BaseLLMClient):
                 )
             if not buffer:
                 break
+            collected: list[dict[str, Any]] = []
+            header_id: str | None = None
+            read_error: Exception | None = None
             try:
-                collected: list[dict[str, Any]] = []
                 async for payload in iter_sse_payloads(response.aiter_lines()):
                     if isinstance(payload.get("error"), dict):
                         message = payload["error"].get("message") or payload["error"]
                         raise GeminiError(f"{self.PROVIDER}: {message}", detail=str(message))
                     collected.append(payload)
+                header_id = (
+                    response.headers.get("x-request-id")
+                    or response.headers.get("x-goog-request-id")
+                )
             except network_errors as exc:
+                read_error = exc
+            finally:
+                # CancelledError is a BaseException, so it must not depend on
+                # ``except Exception`` to release the connection.
                 await response.aclose()
                 response = None
-                last_exc = exc
+            if read_error is not None:
+                last_exc = read_error
                 if attempt == attempts - 1:
-                    fail_network(exc, attempt)
+                    fail_network(read_error, attempt)
                 delay = backoff_with_jitter(self._retry_backoff_s, attempt)
                 logger.warning(
                     "%s stream read failed on attempt %d/%d — retry in %.1fs: %s",
-                    self.PROVIDER, attempt + 1, attempts, delay, exc,
+                    self.PROVIDER, attempt + 1, attempts, delay, read_error,
                 )
                 await asyncio.sleep(delay)
                 continue
-            except Exception:
-                await response.aclose()
-                raise
-            header_id = (
-                response.headers.get("x-request-id")
-                or response.headers.get("x-goog-request-id")
-            )
-            await response.aclose()
-            response = None
-            if header_id and not request_ids:
+            if header_id and request_ids is not None and not request_ids:
                 request_ids.append(header_id)
             for payload in collected:
                 yield payload

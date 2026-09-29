@@ -600,6 +600,52 @@ async def test_streaming_structured_read_timeout_is_not_a_raw_httpx_error():
             await client.generate_text(_request())
 
 
+class _Stalled(httpx.AsyncByteStream):
+    """Block inside the body so the caller can cancel mid-read."""
+
+    def __init__(self, started: asyncio.Event, closed: list[bool]) -> None:
+        self._started = started
+        self._closed = closed
+
+    async def __aiter__(self):
+        self._started.set()
+        await asyncio.Event().wait()
+        yield b""
+
+    async def aclose(self) -> None:
+        self._closed.append(True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming_structured", [False, True])
+async def test_cancel_during_stream_closes_the_http_response(streaming_structured):
+    started = asyncio.Event()
+    closed: list[bool] = []
+    held = httpx.Response(200, stream=_Stalled(started, closed))
+    client = _client(streaming_structured=streaming_structured, max_concurrent=1)
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: held))
+
+    async def consume():
+        if streaming_structured:
+            await client.generate_text(_request(length_retry=False))
+        else:
+            async for _chunk in client.generate_stream(_request(length_retry=False)):
+                pass
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert closed and held.is_closed
+    finally:
+        await held.aclose()
+        await client.aclose()
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_streaming_structured_rejects_a_stream_without_finish_reason():
