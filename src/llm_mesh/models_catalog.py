@@ -7,6 +7,7 @@ Application-specific catalogs never depend on the current working directory.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import logging
@@ -70,7 +71,10 @@ def expand_catalog(data: list[dict]) -> list[dict]:
         if not provs:
             out.append(model)
             continue
-        base = {k: v for k, v in model.items() if k != "providers"}
+        base = {k: v for k, v in model.items() if k not in ("providers", "cluster")}
+        names: list[str] = []
+        seen_names: set[str] = set()
+        drafted: list[tuple[str, dict]] = []
         for prov in provs:
             name = prov.get("name") if isinstance(prov, dict) else None
             if not isinstance(name, str) or not name:
@@ -85,6 +89,24 @@ def expand_catalog(data: list[dict]) -> list[dict]:
                 )
             route["provider"] = name
             route.setdefault("label", route_label(route["id"], name))
+            if name in seen_names:
+                raise ModelCatalogError(
+                    f"catalog model {base.get('id')!r}: duplicate provider {name!r}"
+                )
+            seen_names.add(name)
+            names.append(name)
+            drafted.append((name, route))
+        cluster = model.get("cluster")
+        if cluster is not None:
+            _validate_provider_cluster(base.get("id"), cluster, names)
+            if "cluster" in names:
+                raise ModelCatalogError(
+                    f"catalog model {base.get('id')!r}: a provider cannot be named "
+                    "'cluster'; that name selects the pool"
+                )
+        for _name, route in drafted:
+            if cluster is not None:
+                route["cluster"] = list(cluster)
             out.append(route)
     return out
 
@@ -127,7 +149,39 @@ def _patch_model(original: dict, patch: dict) -> dict:
     result["providers"] = list(providers.values())
     if not result["providers"]:
         raise ModelCatalogError("a provider patch must leave at least one provider")
+    _reconcile_patched_cluster(result, cluster_in_patch="cluster" in patch)
     return result
+
+
+def _reconcile_patched_cluster(result: dict, *, cluster_in_patch: bool) -> None:
+    """Drop providers this patch removed from an inherited ``cluster``.
+
+    ``exclude_providers`` used to leave the name list untouched, and
+    ``expand_catalog`` then refused to load the whole catalog. A name the
+    patch itself still lists is an error. An inherited list shrinks to the
+    providers that remain. Fewer than two is not a pool: the patch has to
+    name the survivors or remove ``cluster``.
+    """
+    cluster = result.get("cluster")
+    if not isinstance(cluster, list):
+        return
+    names = [provider.get("name") for provider in result.get("providers", [])]
+    missing = [name for name in cluster if name not in names]
+    if not missing:
+        return
+    if cluster_in_patch:
+        raise ModelCatalogError(
+            f"{result.get('id')!r}: cluster names provider {missing[0]!r}, "
+            "which this patch removes"
+        )
+    kept = [name for name in cluster if name in names]
+    if len(kept) < 2:
+        raise ModelCatalogError(
+            f"{result.get('id')!r}: exclude_providers leaves cluster with "
+            f"{len(kept)} provider(s); set cluster to the providers that remain "
+            "or remove it"
+        )
+    result["cluster"] = kept
 
 
 def load_catalog_data(path: str | os.PathLike[str] | None = None) -> list[dict]:
@@ -227,8 +281,49 @@ def route_model(route: dict) -> str:
     return str(route.get("model") or "") or _env(route.get("model_env"))
 
 
+def _missing_endpoint_route(route: dict) -> list[str]:
+    """Missing pieces of a multi-server route. An empty list means it can run.
+
+    The API key may sit on the route or on every endpoint. Each endpoint has
+    its own base URL and ``max_concurrent``. A non-GigaChat model may sit on
+    the route or on the endpoint that uses it.
+    """
+    raw = route.get("endpoints")
+    if not isinstance(raw, list) or len(raw) < 2 or any(not isinstance(item, dict) for item in raw):
+        return ["endpoints"]
+    missing: list[str] = []
+    kind = route.get("kind")
+    key_name = route.get("api_key_env") or "LLM_API_KEY"
+    route_key = bool(route.get("api_key") or _env(route.get("api_key_env")))
+    route_model_ready = bool(route_model(route))
+    if kind != "gigachat" and not route_model_ready:
+        for index, endpoint in enumerate(raw):
+            if endpoint.get("model") or _env(endpoint.get("model_env")):
+                continue
+            name = (
+                endpoint.get("model_env")
+                or route.get("model_env")
+                or f"endpoints[{index}].model"
+            )
+            if name not in missing:
+                missing.append(name)
+    key_missing = False
+    for index, endpoint in enumerate(raw):
+        if not (endpoint.get("base_url") or _env(endpoint.get("base_url_env"))):
+            missing.append(endpoint.get("base_url_env") or f"endpoints[{index}].base_url")
+        if endpoint.get("max_concurrent", route.get("max_concurrent")) is None:
+            missing.append(f"endpoints[{index}].max_concurrent")
+        if not route_key and not (endpoint.get("api_key") or _env(endpoint.get("api_key_env"))):
+            key_missing = True
+    if key_missing:
+        missing.append(key_name)
+    return missing
+
+
 def missing_credentials(route: dict) -> list[str]:
     """Return missing environment credentials; an empty list means the route is ready."""
+    if route.get("endpoints") is not None:
+        return _missing_endpoint_route(route)
     missing: list[str] = []
     if route.get("kind") == "gigachat":
         if not (route.get("api_key") or _env(route.get("api_key_env"))):
@@ -275,6 +370,10 @@ def routes_for(selector: str, routes: list[dict] | None = None) -> list[dict]:
         raise ModelCatalogError(
             f"model {model_id!r} not found in catalog. Known id: {known}"
         )
+    if provider == "cluster":
+        pooled = _provider_cluster_route(selector, found)
+        if pooled is not None:
+            return [pooled]
     if provider:
         found = [r for r in found if r.get("provider") == provider]
         if not found:
@@ -284,12 +383,88 @@ def routes_for(selector: str, routes: list[dict] | None = None) -> list[dict]:
     return found
 
 
+def _validate_provider_cluster(model_id: object, cluster: object, names: list[str]) -> None:
+    """``cluster`` names providers of one model that share a queue."""
+    if (
+        not isinstance(cluster, list)
+        or len(cluster) < 2
+        or any(not isinstance(name, str) or not name for name in cluster)
+    ):
+        raise ModelCatalogError(
+            f"{model_id!r}: cluster must name at least two providers"
+        )
+    if len(set(cluster)) != len(cluster):
+        raise ModelCatalogError(f"{model_id!r}: cluster repeats a provider")
+    unknown = [name for name in cluster if name not in names]
+    if unknown:
+        raise ModelCatalogError(
+            f"{model_id!r}: cluster names unknown provider {unknown[0]!r}"
+        )
+
+
+def _is_member_cluster(route: dict) -> bool:
+    """True when ``cluster`` holds full provider routes, not just their names."""
+    members = route.get("cluster")
+    return (
+        isinstance(members, list)
+        and len(members) >= 2
+        and all(isinstance(member, dict) for member in members)
+    )
+
+
+def _provider_cluster_route(selector: str, found: list[dict]) -> dict | None:
+    """The bare model id's pool, or None when this model is not a cluster.
+
+    A named provider (``id@name``) does not come here. Members that are not
+    ready fail the cluster; they are not dropped and not replaced by a
+    provider outside the list.
+    """
+    names = found[0].get("cluster") if found else None
+    if not isinstance(names, list) or not names or not isinstance(names[0], str):
+        return None
+    by_name = {route.get("provider"): route for route in found}
+    missing: list[str] = []
+    members: list[dict] = []
+    for name in names:
+        route = by_name.get(name)
+        if route is None:
+            raise ModelCatalogError(
+                f"{found[0].get('id')!r}: cluster names unknown provider {name!r}"
+            )
+        gap = missing_credentials(route)
+        if gap:
+            missing.append(f"{route.get('label')}: missing {', '.join(gap)}")
+            continue
+        members.append({key: value for key, value in route.items() if key != "cluster"})
+    if missing:
+        raise ModelCatalogError(
+            f"no route for model {selector!r} is ready to run ({'; '.join(missing)})"
+        )
+    return {
+        "id": found[0].get("id"),
+        "label": f"{found[0].get('id')} (cluster)",
+        "provider": "cluster",
+        "cluster": members,
+    }
+
+
 def resolve_route(selector: str, routes: list[dict] | None = None) -> dict:
     """Choose the first route with available credentials, following provider order. If none is
     ready, raise ModelCatalogError listing missing variables; never silently substitute another
     model or gateway.
+
+    A model that declares ``cluster`` is the exception for a bare id: the result is
+    that pool of providers, not the first ready provider. ``id@cluster`` is the
+    same pool. ``id@provider`` is still that one provider.
     """
     found = routes_for(selector, routes)
+    _model_id, provider = _selector_parts(selector)
+    if len(found) == 1 and _is_member_cluster(found[0]):
+        return found[0]
+    if provider is None:
+        pooled = _provider_cluster_route(selector, found)
+        if pooled is not None:
+            return pooled
     for route in found:
         if not missing_credentials(route):
             return route
@@ -305,7 +480,17 @@ def resolve_route(selector: str, routes: list[dict] | None = None) -> dict:
 
 
 def route_env(route: dict) -> dict[str, str]:
-    """Build neutral connection settings and one complete request-options object."""
+    """Build neutral connection settings and one complete request-options object.
+
+    A route with ``endpoints`` or a provider ``cluster`` is a pool of servers.
+    One exported environment cannot name them; build that route with ``make_client``.
+    """
+    if route.get("endpoints") is not None or _is_member_cluster(route):
+        raise ModelCatalogError(
+            f"{route.get('id')!r}: a route with endpoints or a provider cluster "
+            "is a pool of inference servers; build it with make_client, "
+            "not with an exported environment"
+        )
     kind = route.get("kind")
     if kind not in VALID_KINDS:
         raise ModelCatalogError(
@@ -341,6 +526,25 @@ def apply_route_env(route: dict) -> dict[str, str]:
     return env
 
 
+def _apply_pool_env(route: dict) -> None:
+    """Write a pool route's shared settings. Do not invent one server URL.
+
+    ``route_env`` would set ``LLM_BASE_URL`` to an empty string and erase a
+    URL already in the process. The same for ``LLM_MODEL`` when the route
+    itself names none: each endpoint carries its own model.
+    """
+    shared = {key: value for key, value in route.items() if key != "endpoints"}
+    named_model = bool(route_model(shared))
+    if not named_model:
+        shared = {**shared, "model": "-"}
+    env = route_env(shared)
+    if not named_model:
+        env.pop("LLM_MODEL", None)
+    if not env.get("LLM_BASE_URL"):
+        env.pop("LLM_BASE_URL", None)
+    os.environ.update(env)
+
+
 def _build_gigachat_client(route: dict, env: dict) -> Any:
     """Build the GigaChat client. Batch mode swaps in the coalescing adapter."""
     from llm_mesh.gigachat import GigaChatClient
@@ -368,6 +572,7 @@ def _build_gigachat_client(route: dict, env: dict) -> Any:
             credentials=kwargs.get("credentials"),
             scope=kwargs.get("scope"),
         )
+    kwargs.update(_concurrency_kwargs(route))
     return GigaChatClient(**kwargs)
 
 
@@ -385,6 +590,7 @@ def _build_gemini_client(route: dict, env: dict) -> Any:
         kwargs["base_url"] = env["LLM_BASE_URL"]
     if route.get("http_timeout"):
         kwargs["http_timeout"] = float(route["http_timeout"])
+    kwargs.update(_concurrency_kwargs(route))
     return GeminiClient(**kwargs)
 
 
@@ -403,6 +609,7 @@ def _build_anthropic_client(route: dict, env: dict) -> Any:
         anthropic_kwargs["base_url"] = env["LLM_BASE_URL"]
     if route.get("http_timeout"):
         anthropic_kwargs["http_timeout"] = float(route["http_timeout"])
+    anthropic_kwargs.update(_concurrency_kwargs(route))
     return AnthropicClient(**anthropic_kwargs)
 
 
@@ -424,6 +631,7 @@ def _build_openai_client(route: dict, env: dict) -> Any:
         label=env.get("LLM_PROVIDER_LABEL") or None,
         http_timeout=float(route["http_timeout"]) if route.get("http_timeout") else None,
         tiktoken_encoding=str(route["tiktoken_encoding"]) if route.get("tiktoken_encoding") else None,
+        **_concurrency_kwargs(route),
     )
     if batch_mode_enabled() and route_task(route) == "chat":
         return BatchingLLMClient(OpenAIBatchClient(client=client), model=model)
@@ -443,9 +651,86 @@ _ROUTE_CLIENT_BUILDERS: dict[str, Callable[[dict, dict], Any]] = {
 VALID_KINDS = tuple(sorted(_ROUTE_CLIENT_BUILDERS))
 
 
-def make_client(route: dict) -> Any:
-    """Construct the route's LLM client and apply its environment configuration."""
-    env = apply_route_env(route)
+_ENDPOINT_FIELDS = frozenset({
+    "base_url", "base_url_env", "api_key", "api_key_env",
+    "model", "model_env", "max_concurrent", "max_concurrent_streams",
+})
+
+
+def _concurrency_kwargs(route: dict) -> dict[str, int]:
+    """Constructor limits from a route. Empty when the route names neither."""
+    from llm_mesh.concurrency import validate_max_concurrent
+
+    kwargs: dict[str, int] = {}
+    for name in ("max_concurrent", "max_concurrent_streams"):
+        if route.get(name) is None:
+            continue
+        try:
+            value = validate_max_concurrent(route[name], name=name)
+        except ValueError as exc:
+            raise ModelCatalogError(f"{route.get('id')!r}: {exc}") from exc
+        if value is not None:
+            kwargs[name] = value
+    return kwargs
+
+
+def _expand_endpoints(route: dict) -> list[dict]:
+    """One ordinary route per inference server. The parent ``endpoints`` key is dropped."""
+    from llm_mesh.concurrency import validate_max_concurrent
+
+    raw = route.get("endpoints")
+    label = route.get("id") or route.get("label") or "route"
+    if route.get("base_url") or route.get("base_url_env"):
+        raise ModelCatalogError(f"{label!r}: set either base_url or endpoints, not both")
+    if not isinstance(raw, list) or len(raw) < 2:
+        raise ModelCatalogError(
+            f"{label!r}: endpoints must be a list of at least two inference servers"
+        )
+    replicas: list[dict] = []
+    seen: list[tuple[str, str]] = []
+    for index, endpoint in enumerate(raw):
+        if not isinstance(endpoint, dict):
+            raise ModelCatalogError(f"{label!r}: endpoints[{index}] must be an object")
+        unknown = sorted(set(endpoint) - _ENDPOINT_FIELDS)
+        if unknown:
+            raise ModelCatalogError(
+                f"{label!r}: endpoints[{index}] has unknown fields {unknown}"
+            )
+        replica = {key: value for key, value in route.items() if key != "endpoints"}
+        for key, value in endpoint.items():
+            if value is not None:
+                replica[key] = value
+        base = str(replica.get("base_url") or "") or _env(replica.get("base_url_env"))
+        if not base.strip():
+            raise ModelCatalogError(f"{label!r}: endpoints[{index}] has no base_url")
+        try:
+            validate_max_concurrent(replica.get("max_concurrent"))
+        except ValueError as exc:
+            raise ModelCatalogError(f"{label!r}: endpoints[{index}]: {exc}") from exc
+        if replica.get("max_concurrent") is None:
+            raise ModelCatalogError(
+                f"{label!r}: endpoints[{index}] needs max_concurrent"
+            )
+        if replica.get("max_concurrent_streams") is not None:
+            try:
+                validate_max_concurrent(
+                    replica["max_concurrent_streams"], name="max_concurrent_streams",
+                )
+            except ValueError as exc:
+                raise ModelCatalogError(f"{label!r}: endpoints[{index}]: {exc}") from exc
+        key_material = str(replica.get("api_key") or "") or _env(replica.get("api_key_env"))
+        identity = (base.strip().rstrip("/").lower(), key_material)
+        if identity in seen:
+            raise ModelCatalogError(
+                f"{label!r}: endpoints[{index}] repeats inference server {base.strip()}"
+            )
+        seen.append(identity)
+        replicas.append(replica)
+    return replicas
+
+
+def _construct_client(route: dict, env: dict) -> Any:
+    """Build the provider client for one route. Does not touch the process environment."""
     kind = route.get("kind")
     builder = _ROUTE_CLIENT_BUILDERS.get(kind) if isinstance(kind, str) else None
     if builder is None:
@@ -457,7 +742,10 @@ def make_client(route: dict) -> Any:
         raise ModelCatalogError(
             f"{route.get('id')!r}: task 'rerank' is implemented for kind 'openai'"
         )
-    client = builder(route, env)
+    return builder(route, env)
+
+
+def _bind_catalog_client(route: dict, client: Any) -> Any:
     bind = getattr(client, "bind_catalog_route", None)
     if bind is not None:
         try:
@@ -465,6 +753,143 @@ def make_client(route: dict) -> Any:
         except ValueError as exc:
             raise ModelCatalogError(f"{route.get('id')!r}: {exc}") from exc
     return client
+
+
+def _construct_isolated(route: dict) -> Any:
+    """Build one client from ``route`` without keeping its env in the process.
+
+    Call parameters are read from the process environment at construction.
+    A pool member has to see its own route there, then the previous environment
+    comes back, so the next member does not inherit them.
+    """
+    saved = {key: os.environ.get(key) for key in _MANAGED_ENV}
+    try:
+        env = route_env(route)
+        os.environ.update(env)
+        return _construct_client(route, env)
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _clients_for_member(route: dict) -> list[Any]:
+    """Clients for one provider route. An ``endpoints`` route contributes each server."""
+    label = route.get("label") or route.get("provider") or route.get("id") or "provider"
+    if route.get("endpoints") is not None:
+        replicas = _expand_endpoints(route)
+        return [
+            _bind_catalog_client(replica, _construct_isolated(replica))
+            for replica in replicas
+        ]
+    if route.get("max_concurrent") is None:
+        raise ModelCatalogError(f"{label!r}: needs max_concurrent to join a cluster")
+    return [_bind_catalog_client(route, _construct_isolated(route))]
+
+
+def _abandon_clients(clients: list[Any]) -> None:
+    """Close clients a failed pool build will not return.
+
+    Construction does not open HTTP, so this is a no-op until a member has a
+    transport. The limit rollback is separate and always runs.
+    """
+    open_clients = [client for client in clients if getattr(client, "_client", None) is not None]
+
+    async def _close() -> None:
+        for client in open_clients:
+            try:
+                await client.aclose()
+            except Exception:
+                logger.warning(
+                    "llm-mesh: could not close %s after a failed pool build",
+                    type(client).__name__,
+                )
+
+    if not open_clients:
+        return
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(_close())
+        return
+    asyncio.get_running_loop().create_task(_close())
+
+
+def _make_provider_cluster(route: dict) -> Any:
+    """One queue across provider routes. Each member keeps its own call parameters."""
+    from llm_mesh.concurrency import limits_snapshot, restore_limits
+    from llm_mesh.gigachat.batch import batch_mode_enabled
+    from llm_mesh.pool import InferencePool
+
+    members: list[dict] = route["cluster"]
+    if batch_mode_enabled() and any(route_task(member) == "chat" for member in members):
+        raise ModelCatalogError(
+            f"{route.get('id')!r}: a provider cluster dispatches live calls; "
+            "turn LLM_BATCH_MODE off"
+        )
+    before = limits_snapshot()
+    clients: list[Any] = []
+    try:
+        for member in members:
+            clients.extend(_clients_for_member(member))
+        pool = InferencePool(clients)
+    except ValueError as exc:
+        _abandon_clients(clients)
+        restore_limits(before)
+        raise ModelCatalogError(f"{route.get('id')!r}: {exc}") from exc
+    except Exception:
+        _abandon_clients(clients)
+        restore_limits(before)
+        raise
+    task = getattr(clients[0], "_catalog_task", None)
+    if task is not None:
+        pool._catalog_task = task
+    return pool
+
+
+def make_client(route: dict) -> Any:
+    """Construct the route's LLM client and apply its environment configuration.
+
+    A route with ``endpoints`` returns an inference pool of one provider: one
+    shared queue, one client per server, each capped by that server's
+    ``max_concurrent``. A route whose ``cluster`` is a list of provider routes
+    returns the same kind of pool across providers. Those members keep their
+    own kind, credentials, model, and request options. The process environment
+    is left as it was; there is no single server to publish.
+    """
+    if _is_member_cluster(route):
+        return _make_provider_cluster(route)
+    if route.get("endpoints") is None:
+        return _bind_catalog_client(route, _construct_client(route, apply_route_env(route)))
+    from llm_mesh.gigachat.batch import batch_mode_enabled
+    from llm_mesh.pool import InferencePool
+
+    if batch_mode_enabled() and route_task(route) == "chat":
+        raise ModelCatalogError(
+            f"{route.get('id')!r}: endpoints dispatch live calls; "
+            "turn LLM_BATCH_MODE off or use a single base_url"
+        )
+    from llm_mesh.concurrency import limits_snapshot, restore_limits
+
+    replicas = _expand_endpoints(route)
+    _apply_pool_env(route)
+    before = limits_snapshot()
+    clients: list[Any] = []
+    try:
+        for replica in replicas:
+            clients.append(_construct_isolated(replica))
+        client = InferencePool(clients)
+    except ValueError as exc:
+        _abandon_clients(clients)
+        restore_limits(before)
+        raise ModelCatalogError(f"{route.get('id')!r}: {exc}") from exc
+    except Exception:
+        _abandon_clients(clients)
+        restore_limits(before)
+        raise
+    return _bind_catalog_client(route, client)
 
 
 def selected_model_id() -> str:
@@ -480,10 +905,16 @@ def make_selected_client() -> Any | None:
     if not selector:
         return None
     route = resolve_route(selector)
-    logger.info(
-        "LLM from model catalog: %s (kind=%s, model=%s)",
-        route["label"], route.get("kind"), route_model(route),
-    )
+    if _is_member_cluster(route):
+        names = ", ".join(
+            str(member.get("provider") or member.get("kind")) for member in route["cluster"]
+        )
+        logger.info("LLM from model catalog: %s (cluster of %s)", route["label"], names)
+    else:
+        logger.info(
+            "LLM from model catalog: %s (kind=%s, model=%s)",
+            route["label"], route.get("kind"), route_model(route),
+        )
     return make_client(route)
 
 
@@ -497,11 +928,13 @@ def _format_check_line(result: Any) -> str:
 
 
 def _cli_check(selector: str, routes: list[dict]) -> int:
-    """Probe every matching route. Exit 0 when at least one route is ok.
+    """Probe the selected route. Exit 0 when a probed route is ok.
 
-    A bare model id checks every provider. ``id@provider`` checks that one
-    route, so exit 0 means that route succeeded. The header is printed
-    because, unlike ``--list``, this command sends real requests.
+    A bare model id checks every provider, unless the model declares
+    ``cluster``: then the probe is that pool, and providers outside the list
+    are not called. ``id@cluster`` is the same pool. ``id@provider`` checks
+    that one route. The header is printed because, unlike ``--list``, this
+    command sends real requests.
     """
     from llm_mesh.probe import check_routes
 
@@ -545,7 +978,12 @@ def _cli(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(route, ensure_ascii=False, indent=2))
             return 0
-        for key, value in sorted(route_env(route).items()):
+        try:
+            exported = route_env(route)
+        except ModelCatalogError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        for key, value in sorted(exported.items()):
             print(f"export {key}={shlex.quote(value)}")
         return 0
 

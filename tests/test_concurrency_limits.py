@@ -434,3 +434,37 @@ def test_streams_and_calls_share_the_endpoint_across_clients(monkeypatch, _no_en
         assert other._ensure_semaphore() is chat._ensure_semaphore()
 
     asyncio.run(run())
+
+
+def test_try_acquire_stops_at_the_limit():
+    client = _openai(max_concurrent=1)
+
+    async def run():
+        limiter = client._ensure_semaphore()
+        assert limiter is not None
+        assert limiter.try_acquire() is True
+        assert limiter.held == 1
+        assert limiter.try_acquire() is False
+        limiter.release()
+        assert limiter.held == 0
+
+    asyncio.run(run())
+
+
+def test_release_without_notify_does_not_wake_listeners():
+    client = _openai(max_concurrent=1, max_concurrent_streams=1)
+
+    async def run():
+        limiter = client._ensure_stream_semaphore()
+        assert limiter is not None
+        woken: list[int] = []
+        limiter.add_release_listener(lambda: woken.append(1))
+        assert limiter.try_acquire() is True
+        limiter.release(notify=False)
+        assert limiter.held == 0
+        assert woken == []
+        assert limiter.try_acquire() is True
+        limiter.release()
+        assert woken == [1]
+
+    asyncio.run(run())

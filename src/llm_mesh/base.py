@@ -270,11 +270,13 @@ class BaseLLMClient(ABC):
 
     def _ensure_stream_semaphore(self) -> EndpointLimiter | None:
         """The endpoint's streams limiter in the running loop, or None."""
+        from llm_mesh.concurrency import STREAMS, dispatched_slot_is_held, scope_semaphore
+
+        if dispatched_slot_is_held():
+            return None
         scope = getattr(self, "_limit_scope", None)
         if scope is None:
             return None
-        from llm_mesh.concurrency import STREAMS, scope_semaphore
-
         return scope_semaphore(scope, STREAMS)
 
     @asynccontextmanager
@@ -302,11 +304,15 @@ class BaseLLMClient(ABC):
         ``_max_concurrent`` keeps a private semaphore (third-party subclasses).
         The semaphore is created lazily: the client is often constructed before
         any loop exists, and building it in __init__ binds it to the wrong loop.
+        A pool dispatch already holds this server's slot, so the member does
+        not take another one.
         """
+        from llm_mesh.concurrency import dispatched_slot_is_held, scope_semaphore
+
+        if dispatched_slot_is_held():
+            return None
         scope = getattr(self, "_limit_scope", None)
         if scope is not None:
-            from llm_mesh.concurrency import scope_semaphore
-
             self._semaphore = scope_semaphore(scope)
             return self._semaphore
         if self._max_concurrent is None:

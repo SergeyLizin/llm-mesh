@@ -1922,6 +1922,5 @@ class GigaChatClient(BaseLLMClient):
         return messages
 
 
-# Deprecated alias, kept for the 2.x line and removed in 3.0.0. The async
-# prefix said nothing: every client in the package is async.
+# Deprecated alias. The async prefix said nothing: every client in the package is async.
 GigaChatAsyncClient = GigaChatClient

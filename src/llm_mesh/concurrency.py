@@ -27,6 +27,10 @@ slot. With ``max_concurrent=8`` and ``max_concurrent_streams=5`` at most five
 long streams run at once and at least three slots stay free for short calls
 (retrieval, embeddings, rerank), while the endpoint still never sees more than
 eight requests. The fixed order (streams, then regular) cannot deadlock.
+
+Several servers, each with its own limit, are not one shared semaphore.
+``llm_mesh.pool.InferencePool`` keeps a single FIFO queue and a separate
+limiter per server, and sends a call only to a server that has a free slot.
 """
 
 from __future__ import annotations
@@ -36,6 +40,10 @@ import hashlib
 import logging
 import threading
 import weakref
+from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +57,14 @@ __all__ = [
     "EndpointLimiter",
     "REQUESTS",
     "STREAMS",
+    "dispatched_slot_is_held",
+    "holding_dispatched_slot",
 ]
+
+# Set for the duration of a call that already holds its server slot (an
+# inference pool). The member's own acquire would take a second slot, or
+# deadlock when the pool holds the server's only one.
+_SLOT_HELD: ContextVar[bool] = ContextVar("llm_mesh_dispatched_slot", default=False)
 
 REQUESTS = "requests"
 STREAMS = "streams"
@@ -73,6 +88,25 @@ def validate_max_concurrent(value: int | None, *, name: str = "max_concurrent") 
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer or None, got {value!r}")
     return value
+
+
+def dispatched_slot_is_held() -> bool:
+    """True while a pool dispatch is inside the member call on this task."""
+    return _SLOT_HELD.get()
+
+
+@contextmanager
+def holding_dispatched_slot() -> Iterator[None]:
+    """Mark this task as already holding the server slot it is about to use.
+
+    The member client then skips its own limiter. The caller must already
+    have taken the slot; this does not take one.
+    """
+    token = _SLOT_HELD.set(True)
+    try:
+        yield
+    finally:
+        _SLOT_HELD.reset(token)
 
 
 def limit_scope(base_url: str | None, credential: str | None) -> str:
@@ -159,17 +193,59 @@ class EndpointLimiter:
         self._waiters: list[asyncio.Future[None]] = []
         # Futures that already own a handed-off slot. They must not acquire again.
         self._granted: set[asyncio.Future[None]] = set()
+        self._listeners: list[Callable[[], None]] = []
 
     @property
     def limit(self) -> int | None:
         return scope_limit(self._scope, self._kind)
+
+    @property
+    def held(self) -> int:
+        """Slots taken and not yet released, including ones handed to a waiter."""
+        return self._held
+
+    def add_release_listener(self, listener: Callable[[], None]) -> None:
+        """Call ``listener`` when a slot becomes free. Idempotent for one function."""
+        if listener not in self._listeners:
+            self._listeners.append(listener)
+
+    def try_acquire(self) -> bool:
+        """Take one slot without waiting. False when the scope is at capacity.
+
+        Spare capacity is taken even if this limiter has a waiter: ``__aenter__``
+        does the same. A waiter is handed the next slot only on release, while
+        the scope stays full. The caller must ``release`` what it took.
+        """
+        limit = self.limit
+        if limit is not None and self._held >= limit:
+            return False
+        self._held += 1
+        return True
+
+    def release(self, *, notify: bool = True) -> None:
+        """Return one slot taken by ``try_acquire`` or ``__aenter__``.
+
+        ``notify=False`` frees the slot without waking listeners. A pool uses
+        that when a stream slot was taken and the request slot was not: waking
+        the pool would retry that same attempt on this stack and never return
+        to the event loop. A waiter already queued on this limiter still
+        receives the slot.
+        """
+        self._release(notify=notify)
+
+    def _notify(self) -> None:
+        for listener in list(self._listeners):
+            try:
+                listener()
+            except Exception:
+                logger.exception("llm-mesh: concurrency release listener failed")
 
     def locked(self) -> bool:
         """True when a new acquire would wait."""
         limit = self.limit
         return limit is not None and self._held >= limit
 
-    def _release(self) -> None:
+    def _release(self, *, notify: bool = True) -> None:
         """Free one slot, or hand it to the oldest waiter."""
         if self.limit is not None:
             while self._waiters:
@@ -184,7 +260,11 @@ class EndpointLimiter:
                 # is visible before it returns from ``await``.
                 self._granted.add(fut)
                 return
+        if self._held <= 0:
+            raise RuntimeError("llm-mesh: concurrency slot released without a holder")
         self._held -= 1
+        if notify:
+            self._notify()
         if self.limit is None and self._waiters:
             waiters = self._waiters
             self._waiters = []
@@ -246,6 +326,30 @@ def scope_semaphore(scope: str, kind: str = REQUESTS) -> EndpointLimiter | None:
             limiter = EndpointLimiter(kind, scope)
             per_loop[key] = limiter
         return limiter
+
+
+def limits_snapshot() -> dict[tuple[str, str], int]:
+    """Copy the registered limits. A failed client build restores this copy."""
+    with _lock:
+        return dict(_limits)
+
+
+def restore_limits(snapshot: dict[tuple[str, str], int]) -> None:
+    """Put limits back to ``snapshot``.
+
+    Building a pool registers each member as it is constructed. If a later
+    member fails, those registrations must not stay: the smallest registered
+    limit wins, so a discarded member would cap a later client of the same
+    endpoint. Keys the snapshot does not have are removed. Keys it has are
+    put back, including a limit this build lowered. Other keys are left as
+    they are.
+    """
+    with _lock:
+        for key in list(_limits):
+            if key not in snapshot:
+                del _limits[key]
+            elif _limits[key] != snapshot[key]:
+                _limits[key] = snapshot[key]
 
 
 def reset_limits() -> None:

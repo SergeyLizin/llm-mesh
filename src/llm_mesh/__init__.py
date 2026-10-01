@@ -1,5 +1,6 @@
 """Async LLM clients and shared request/response types."""
 
+from llm_mesh.pool import InferencePool
 from llm_mesh.protocol import (
     AsyncClosable,
     BatchLLMClient,
@@ -40,6 +41,7 @@ __all__ = [
     "AudioAttachment",
     "DocumentAttachment",
     "ImageAttachment",
+    "InferencePool",
     "VideoAttachment",
     "LLMAuthError",
     "LLMBudgetExceeded",
@@ -78,7 +80,7 @@ __all__ += [
     "GeminiError",
     "OpenAIClient",
     "GigaChatClient",
-    "GigaChatAsyncClient",  # Deprecated alias; removed in 3.0.0.
+    "GigaChatAsyncClient",  # Deprecated alias of GigaChatClient.
     "LLMUsage",
     "LLMStreamChunk",
 ]

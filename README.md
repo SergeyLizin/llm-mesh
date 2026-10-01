@@ -49,7 +49,7 @@ async def main():
 asyncio.run(main())
 ```
 
-The same `LLMRequest` works with `AnthropicClient`, `GeminiClient`, and `GigaChatClient`. Close the client with `aclose()` when you are done. `GigaChatClient` was named `GigaChatAsyncClient` through 2.2.0; the old name remains as a deprecated alias and is removed in 3.0.0.
+The same `LLMRequest` works with `AnthropicClient`, `GeminiClient`, and `GigaChatClient`. Close the client with `aclose()` when you are done. `GigaChatClient` was named `GigaChatAsyncClient` through 2.2.0; the old name remains as a deprecated alias.
 
 To pick a model from the bundled catalog instead of constructing a client by hand:
 
@@ -232,6 +232,72 @@ Providers limit concurrent requests per account, so the limit is shared per endp
 - The semaphore lives in the running event loop; the limit holds per loop. `llm_mesh.concurrency.reset_limits()` forgets all endpoints (tests).
 
 A stream (`generate_stream`, `generate_stream_events`, and Gemini `generateContent` when `LLM_STREAM_STRUCTURED` is on) holds its slot until it ends, because the provider counts an open stream as an active request. Long answers can therefore take every slot and queue short calls behind them. `max_concurrent_streams=` (or `LLM_MAX_CONCURRENT_STREAMS`, or a catalog route's `max_concurrent_streams`) reserves the rest: a stream takes a streams slot and then a regular slot; blocking calls take only a regular slot. With `max_concurrent=8, max_concurrent_streams=5` at most five streams run at once, at least three slots stay free for retrieval, embeddings and rerank, and the endpoint still never sees more than eight requests. The streams limit is shared per endpoint like the main one (smallest wins). A streams limit that is not below `max_concurrent` does not reserve a slot for blocking calls and logs a warning. A streams limit set without `max_concurrent` caps streams only; blocking calls stay unlimited, and that also logs a warning. A limit lowered after the limiter exists applies to the next acquire. Calls that already hold a slot finish.
+
+### Several inference servers
+
+One limiter is one server. When the process has several servers, and each server allows a different number of in-flight calls, use `InferencePool`. The pool has one FIFO queue. A call runs on a server that has a free slot. A server is never given more calls than its `max_concurrent`. A call that fits none of the servers waits. The oldest waiting call that fits a free server runs first, so a stream that cannot start does not hold up a short call that can. The slot stays held until the call finishes, including retries and the rest of a stream.
+
+```python
+from llm_mesh import InferencePool, OpenAIClient
+
+pool = InferencePool([
+    OpenAIClient(model="qwen", base_url="http://gpu1:8000/v1", api_key="k", max_concurrent=4),
+    OpenAIClient(model="qwen", base_url="http://gpu2:8000/v1", api_key="k", max_concurrent=2),
+])
+response = await pool.generate_text(request)
+```
+
+Each member needs its own positive `max_concurrent`. Two members of one `(base URL, API key)` are one server and are rejected. Prefer the server with more free slots; when the numbers match, the earlier member is used. A call runs only on a member that implements it: `rerank` and `tools_required` stay off a member that does not declare them, and a call nobody implements fails immediately instead of waiting. `supports` is true when at least one member implements the capability. Streams still take a stream slot and then a request slot on that same server when the member has `max_concurrent_streams`. Giving the stream slot back, because the request slot was full, does not wake the queue; the stream waits until a request slot is actually free. `count_tokens`, embeddings, and rerank take a request slot too. `model` is the first member's model. `budget_state` sums every member. `check_client` probes every member with the call that reaches that member, so a local token count does not pass for another server.
+
+A catalog route lists the servers under `endpoints` instead of a single `base_url`. `make_client` returns the pool. `max_concurrent` on the route applies to every server that does not set its own.
+
+```json
+{
+  "id": "qwen-local",
+  "kind": "openai",
+  "model": "qwen",
+  "providers": [{
+    "name": "local",
+    "api_key_env": "LOCAL_LLM_API_KEY",
+    "endpoints": [
+      {"base_url": "http://gpu1:8000/v1", "max_concurrent": 4},
+      {"base_url": "http://gpu2:8000/v1", "max_concurrent": 2, "max_concurrent_streams": 1}
+    ]
+  }]
+}
+```
+
+`LLM_BATCH_MODE` does not combine with `endpoints`. `llm-mesh --env` refuses a pooled route: one export cannot name every server. Build the pool with `make_client`.
+
+A model can also pool different providers. `cluster` lists their names. Each provider keeps its own kind, key, model, and request options (`extra_body`, reasoning, timeouts, and the rest). The bare model id and `id@cluster` select that pool. `id@provider` still selects one provider. A provider cannot be named `cluster` on a model that declares one. A listed provider may itself use `endpoints`; those servers join the same queue, each with that provider's call parameters and its own limit. Choosing the cluster does not write one member's URL or options into the process environment. `llm-mesh --check` on the bare id or `id@cluster` probes that pool, not providers left outside the list. A catalog patch that excludes a clustered provider drops that name from `cluster` when at least two remain.
+
+```json
+{
+  "id": "qwen",
+  "cluster": ["silicon", "gigachat"],
+  "providers": [
+    {
+      "name": "silicon",
+      "kind": "openai",
+      "model": "Qwen/Qwen3.6-27B",
+      "base_url": "http://gpu1:8000/v1",
+      "api_key_env": "SILICON_API_KEY",
+      "max_concurrent": 4,
+      "extra_body": {"top_p": 0.2}
+    },
+    {
+      "name": "gigachat",
+      "kind": "gigachat",
+      "model": "GigaChat-2",
+      "api_key_env": "GIGACORP_API_KEY",
+      "max_concurrent": 1,
+      "reasoning_effort": "low"
+    }
+  ]
+}
+```
+
+`LLM_BATCH_MODE` does not combine with a provider cluster either. `llm-mesh --env` refuses it.
 
 ### Output, reasoning, and schema
 

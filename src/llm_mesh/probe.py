@@ -24,8 +24,17 @@ from pydantic import BaseModel, ConfigDict
 from llm_mesh.anthropic.client import AnthropicClient
 from llm_mesh.gemini.client import GeminiClient
 from llm_mesh.gigachat.client import GigaChatClient
-from llm_mesh.models_catalog import make_client, route_model, routes_for
+from llm_mesh.models_catalog import (
+    ModelCatalogError,
+    _selector_parts,
+    load_catalog,
+    make_client,
+    resolve_route,
+    route_model,
+    routes_for,
+)
 from llm_mesh.openai.client import OpenAIClient
+from llm_mesh.pool import InferencePool
 from llm_mesh.types import LLMRequest, LLMTimeoutError
 
 logger = logging.getLogger(__name__)
@@ -72,6 +81,9 @@ class ConnectionCheck(BaseModel):
 
 
 def _identity(client: Any) -> tuple[str, str, str]:
+    if isinstance(client, InferencePool):
+        label, kind, model = _identity(client.clients[0])
+        return label, kind, client.model or model
     if isinstance(client, OpenAIClient):
         return client.PROVIDER, "openai", client._model
     if isinstance(client, AnthropicClient):
@@ -81,6 +93,13 @@ def _identity(client: Any) -> tuple[str, str, str]:
     if isinstance(client, GigaChatClient):
         return client.PROVIDER, "gigachat", client.model
     return type(client).__name__, "", ""
+
+
+def _probe_subject(client: Any) -> Any:
+    """The client whose kind selects the probe. A pool is probed through itself."""
+    if isinstance(client, InferencePool):
+        return client.clients[0]
+    return client
 
 
 def _probe_for(client: Any) -> ProbeKind:
@@ -93,19 +112,25 @@ def _probe_for(client: Any) -> ProbeKind:
     Gemini's countTokens authenticate without a chat completion.
     OpenAI's count is local tiktoken and does not reach the gateway, so
     a chat route still sends one tiny generation.
+    A pool is not probed as one call: each member is probed with its own
+    kind, so a local token count cannot stand in for another server.
     """
-    task = getattr(client, "_catalog_task", "chat")
+    subject = _probe_subject(client)
+    task = getattr(client, "_catalog_task", None)
+    if task is None:
+        task = getattr(subject, "_catalog_task", "chat")
     if task == "embeddings":
         return ProbeKind.EMBED
     if task == "rerank":
         return ProbeKind.RERANK
-    if isinstance(client, (GigaChatClient, AnthropicClient, GeminiClient)):
+    if isinstance(subject, (GigaChatClient, AnthropicClient, GeminiClient)):
         return ProbeKind.COUNT_TOKENS
-    if isinstance(client, OpenAIClient):
+    if isinstance(subject, OpenAIClient):
         return ProbeKind.GENERATE_TEXT
     raise TypeError(
         f"no connection probe for {type(client).__name__}; "
-        "pass an OpenAI, Anthropic, Gemini, or GigaChat client"
+        "pass an OpenAI, Anthropic, Gemini, or GigaChat client, "
+        "or an InferencePool of those clients"
     )
 
 
@@ -204,11 +229,17 @@ async def check_client(
 
     ``timeout`` defaults to 60 seconds around the whole probe, including
     the client's retries. ``timeout=None`` leaves only the client timeout.
+
+    An ``InferencePool`` is probed member by member. Each member gets the
+    probe that reaches that member, unless ``probe`` names one kind for
+    every member. One failure fails the pool. The label stays the pool's.
     """
     if probe is not None and not isinstance(probe, ProbeKind):
         raise TypeError(
             f"probe must be ProbeKind or None, got {type(probe).__name__}"
         )
+    if isinstance(client, InferencePool):
+        return await _check_pool(client, probe=probe, timeout=timeout)
     selected = probe if probe is not None else _probe_for(client)
     label, kind, model = _identity(client)
     started = time.perf_counter()
@@ -236,6 +267,54 @@ async def check_client(
         model=model,
         latency_ms=_elapsed_ms(started),
         detail=selected.value,
+    )
+
+
+def _member_where(member: Any) -> str:
+    provider = getattr(member, "PROVIDER", type(member).__name__)
+    model = getattr(member, "model", None) or getattr(member, "_model", "")
+    if isinstance(model, str) and model:
+        return f"{provider}/{model}"
+    return str(provider)
+
+
+async def _check_pool(
+    pool: InferencePool,
+    *,
+    probe: ProbeKind | None,
+    timeout: float | None,
+) -> ConnectionCheck:
+    """Probe every member. The kind follows the member when ``probe`` is unset."""
+    label, kind, model = _identity(pool)
+    started = time.perf_counter()
+    for member in pool.clients:
+        selected = probe if probe is not None else _probe_for(member)
+        where = _member_where(member)
+        try:
+            await _invoke_bounded(member, selected, timeout)
+        except NotImplementedError as exc:
+            raise TypeError(
+                f"{type(pool).__name__} member {type(member).__name__} "
+                f"does not implement probe {selected.value}"
+            ) from exc
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
+        except Exception as exc:
+            return _failure(
+                label=label,
+                kind=kind,
+                model=model,
+                exc=exc,
+                latency_ms=_elapsed_ms(started),
+                detail=f"{where}: {selected.value}",
+            )
+    return ConnectionCheck(
+        ok=True,
+        label=label,
+        kind=kind,
+        model=model,
+        latency_ms=_elapsed_ms(started),
+        detail="each member",
     )
 
 
@@ -349,20 +428,44 @@ def check_route(
     return _overlay(route, result)
 
 
+def _declares_provider_cluster(routes: list[dict], model_id: str) -> bool:
+    found = [route for route in routes if route.get("id") == model_id]
+    names = found[0].get("cluster") if found else None
+    return isinstance(names, list) and bool(names) and isinstance(names[0], str)
+
+
 def check_routes(
     selector: str,
     routes: list[dict] | None = None,
     *,
     timeout: float | None = DEFAULT_PROBE_TIMEOUT_S,
 ) -> list[ConnectionCheck]:
-    """Probe every provider route for ``selector``, in catalog order.
+    """Probe the routes ``selector`` actually runs.
 
-    ``selector`` is a model id or ``id@provider``. Each route is built with
-    ``make_client``, which replaces the process environment. The last route
-    leaves its environment in place. ``timeout`` is the per-route probe cap;
-    see ``check_client``.
+    A model that declares ``cluster`` is probed as that pool, for a bare id
+    and for ``id@cluster``. Providers outside the list are not built, and
+    building the pool does not leave a member's environment in the process.
+    Any other bare id probes every provider, in catalog order. ``id@provider``
+    probes that one route. Each route is built with ``make_client``. The last
+    single-provider route leaves its environment in place. ``timeout`` is the
+    per-route probe cap; see ``check_client``.
     """
+    catalog = load_catalog() if routes is None else routes
+    model_id, provider = _selector_parts(selector)
+    if provider in (None, "cluster") and _declares_provider_cluster(catalog, model_id):
+        try:
+            chosen = [resolve_route(selector, catalog)]
+        except ModelCatalogError as exc:
+            return [_failure(
+                label=f"{model_id} (cluster)",
+                kind="",
+                model=model_id,
+                exc=exc,
+                latency_ms=None,
+                detail="",
+            )]
+        return [check_route(route, timeout=timeout) for route in chosen]
     return [
         check_route(route, timeout=timeout)
-        for route in routes_for(selector, routes)
+        for route in routes_for(selector, catalog)
     ]
